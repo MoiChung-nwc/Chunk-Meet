@@ -1,0 +1,117 @@
+############################
+# 🌐 GLOBAL IGNORE (Common)
+############################
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+*.out
+*.err
+
+# Environment files
+.env
+webrtc/.env
+front-end/.env
+
+# IDE / Editors
+.vscode/
+.idea/
+*.iml
+
+# Build / Temp
+dist/
+build/
+tmp/
+*.tmp
+*.swp
+*.swo
+
+############################
+# ⚛️ FRONT-END (React / Node)
+############################
+
+# Node modules
+node_modules/
+
+# Dependency directories
+jspm_packages/
+
+# Optional npm cache directory
+.npm
+
+# dotenv environment files
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# Testing
+coverage/
+jest/
+
+# Production build output
+front-end/build/
+front-end/dist/
+
+############################
+# ☕ BACK-END (Spring Boot / Java)
+############################
+
+# Compiled source
+*.class
+
+# Package Files
+*.jar
+*.war
+*.ear
+
+# Maven
+target/
+!.mvn/wrapper/maven-wrapper.jar
+.mvn/
+.settings/
+.classpath
+.project
+
+# Gradle
+.gradle/
+build/
+!gradle/wrapper/gradle-wrapper.jar
+
+# IntelliJ / Eclipse
+*.idea/
+*.classpath
+*.project
+*.settings/
+
+# Application Config
+application-*.yml
+application-*.properties
+
+############################
+# 🐳 DOCKER & DEPLOY
+############################
+
+# Docker
+docker-compose.override.yml
+Dockerfile.local
+.env.docker
+
+# Deployment
+*.pid
+*.seed
+*.bak
+
+############################
+# ⚙️ MISC
+############################
+
+# JetBrains
+out/
+
+# Generated files
+*.generated.*
