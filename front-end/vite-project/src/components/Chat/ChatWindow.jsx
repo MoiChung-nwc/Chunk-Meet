@@ -1,39 +1,147 @@
-import React, { useState, useEffect, useRef } from "react";
+import React, { useEffect, useState, useRef, useCallback } from "react";
 import { IoSend, IoArrowBackSharp } from "react-icons/io5";
+import axios from "axios";
+import { wsChatManager } from "../../utils/WebSocketManager";
 
 const ChatWindow = ({ user, onBack }) => {
-  const [messages, setMessages] = useState([
-    { id: 1, from: "them", text: "Hi there! 👋", time: "10:00" },
-    { id: 2, from: "me", text: "Hello! How are you?", time: "10:01" },
-  ]);
+  const [messages, setMessages] = useState([]);
   const [newMsg, setNewMsg] = useState("");
-  const [typing, setTyping] = useState(false);
-
+  const [isTyping, setIsTyping] = useState(false);
+  const [isOnline, setIsOnline] = useState(false);
+  const [lastSeen, setLastSeen] = useState(null);
   const messagesEndRef = useRef(null);
+  const typingTimeoutRef = useRef(null);
+  const lastTypingSentRef = useRef(0);
 
-  // Auto scroll xuống tin mới
+  const token = sessionStorage.getItem("accessToken");
+  const email =
+    sessionStorage.getItem("email") ||
+    JSON.parse(localStorage.getItem("user") || "{}").email;
+
+  // 🧠 Connect to WebSocket
+  useEffect(() => {
+    if (!user?.conversationId) return;
+
+    const connect = async () => {
+      try {
+        await wsChatManager.connect("/ws/chat", token, handleMessage);
+        wsChatManager.send(
+          { type: "join", conversationId: user.conversationId },
+          "/ws/chat"
+        );
+
+        // ✅ Mark conversation as read when opened
+        markConversationAsRead(user.conversationId);
+      } catch (err) {
+        console.error("❌ Chat WS connect error:", err);
+      }
+    };
+
+    connect();
+    return () => wsChatManager.disconnect("/ws/chat", "Leaving chat");
+  }, [user]);
+
+  /** ✅ Mark messages as read in backend */
+  const markConversationAsRead = async (conversationId) => {
+    try {
+      await axios.put(
+        `http://localhost:8081/api/chat/mark-read?conversationId=${conversationId}&email=${email}`,
+        null,
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+
+      // 🧩 Gửi event qua WebSocket để sidebar cập nhật realtime
+      wsChatManager.send(
+        { type: "read-update", conversationId, reader: email },
+        "/ws/chat"
+      );
+    } catch (err) {
+      console.error("⚠️ Lỗi markAsRead:", err);
+    }
+  };
+
+  // 📩 Handle messages from WebSocket
+  const handleMessage = (msg) => {
+    switch (msg.type) {
+      case "chat-history":
+        setMessages(msg.messages || []);
+        break;
+
+      case "chat":
+        if (msg.conversationId === user.conversationId) {
+          setMessages((prev) => [...prev, msg]);
+        }
+        break;
+
+      case "typing":
+        if (msg.from === user.email) {
+          setIsTyping(true);
+          clearTimeout(typingTimeoutRef.current);
+          typingTimeoutRef.current = setTimeout(() => setIsTyping(false), 2000);
+        }
+        break;
+
+      // 👇 NEW: update online / offline / last seen
+      case "user-status":
+        if (msg.email === user.email) {
+          setIsOnline(msg.online);
+          setLastSeen(msg.lastSeen || null);
+        }
+        break;
+
+      // 👇 NEW: handle read update realtime
+      case "read-update":
+        if (msg.conversationId === user.conversationId) {
+          console.log("📖 Tin nhắn đã đọc bởi:", msg.reader);
+        }
+        break;
+
+      default:
+        console.log("📨 WS:", msg);
+    }
+  };
+
+  // 🕐 Scroll to bottom when messages update
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, typing]);
+  }, [messages]);
 
-  // Hiệu ứng typing giả lập (demo)
-  useEffect(() => {
-    const timer = setInterval(() => {
-      if (Math.random() > 0.7) setTyping(true);
-      else setTyping(false);
-    }, 4000);
-    return () => clearInterval(timer);
-  }, []);
+  // ✍️ Send typing event (debounced)
+  const sendTyping = useCallback(() => {
+    const now = Date.now();
+    if (now - lastTypingSentRef.current > 1500) {
+      lastTypingSentRef.current = now;
+      wsChatManager.send(
+        { type: "typing", conversationId: user.conversationId, from: email },
+        "/ws/chat"
+      );
+    }
+  }, [user?.conversationId, email]);
 
+  // 📤 Send chat message
   const sendMessage = () => {
     if (!newMsg.trim()) return;
-    setMessages([
-      ...messages,
-      { id: Date.now(), from: "me", text: newMsg.trim(), time: "Now" },
-    ]);
+    wsChatManager.send(
+      {
+        type: "chat",
+        conversationId: user.conversationId,
+        message: newMsg.trim(),
+      },
+      "/ws/chat"
+    );
     setNewMsg("");
-    setTyping(true);
-    setTimeout(() => setTyping(false), 2000);
+  };
+
+  // 🧩 Render user status text (no UI change)
+  const renderStatusText = () => {
+    if (isTyping) return "Đang nhập...";
+    if (isOnline) return "Đang hoạt động";
+    if (lastSeen)
+      return `Hoạt động ${new Date(lastSeen).toLocaleTimeString("vi-VN", {
+        hour: "2-digit",
+        minute: "2-digit",
+      })}`;
+    return "Ngoại tuyến";
   };
 
   return (
@@ -46,49 +154,47 @@ const ChatWindow = ({ user, onBack }) => {
         >
           <IoArrowBackSharp size={22} />
         </button>
-        <div className="relative">
-          <img
-            src={user.avatar}
-            alt={user.name}
-            className="w-10 h-10 rounded-full"
-          />
-          {user.online && (
-            <span className="absolute bottom-0 right-0 w-3 h-3 bg-green-500 rounded-full border-2 border-white"></span>
-          )}
-        </div>
-        <div className="flex flex-col">
-          <span className="font-semibold text-gray-800">{user.name}</span>
-          <span className="text-xs text-gray-500">
-            {typing ? "Đang nhập..." : user.online ? "Đang hoạt động" : "Ngoại tuyến"}
-          </span>
+        <img
+          src="https://cdn-icons-png.flaticon.com/512/3135/3135715.png"
+          alt={user.name}
+          className="w-10 h-10 rounded-full"
+        />
+        <div>
+          <p className="font-semibold text-gray-800">
+            {user.firstName || user.name}
+          </p>
+          <p className="text-xs text-gray-500">{renderStatusText()}</p>
         </div>
       </div>
 
-      {/* Messages */}
+      {/* Message list */}
       <div className="flex-1 overflow-y-auto p-5 bg-gradient-to-b from-gray-50 to-white space-y-2">
-        {messages.map((msg) => (
+        {messages.map((msg, idx) => (
           <div
-            key={msg.id}
+            key={idx}
             className={`flex ${
-              msg.from === "me" ? "justify-end" : "justify-start"
+              msg.sender === email ? "justify-end" : "justify-start"
             }`}
           >
             <div
               className={`max-w-[75%] px-4 py-2 rounded-2xl text-sm ${
-                msg.from === "me"
+                msg.sender === email
                   ? "bg-blue-600 text-white rounded-br-none"
                   : "bg-gray-200 text-gray-800 rounded-bl-none"
               }`}
             >
-              {msg.text}
+              {msg.message}
               <span className="block text-[10px] mt-1 opacity-70 text-right">
-                {msg.time}
+                {new Date(msg.timestamp).toLocaleTimeString("vi-VN", {
+                  hour: "2-digit",
+                  minute: "2-digit",
+                })}
               </span>
             </div>
           </div>
         ))}
 
-        {typing && (
+        {isTyping && (
           <div className="flex justify-start">
             <div className="px-4 py-2 rounded-2xl bg-gray-200 text-gray-600 text-sm flex gap-1">
               <span className="w-2 h-2 bg-gray-500 rounded-full animate-bounce"></span>
@@ -100,15 +206,18 @@ const ChatWindow = ({ user, onBack }) => {
         <div ref={messagesEndRef}></div>
       </div>
 
-      {/* Input box */}
+      {/* Input */}
       <div className="p-4 border-t border-gray-200 bg-white flex items-center gap-3">
         <input
           type="text"
           value={newMsg}
-          onChange={(e) => setNewMsg(e.target.value)}
+          onChange={(e) => {
+            setNewMsg(e.target.value);
+            sendTyping();
+          }}
           placeholder="Nhập tin nhắn..."
-          className="flex-1 px-4 py-2 bg-gray-100 rounded-full outline-none text-sm focus:ring-2 focus:ring-blue-500"
           onKeyDown={(e) => e.key === "Enter" && sendMessage()}
+          className="flex-1 px-4 py-2 bg-gray-100 rounded-full outline-none text-sm focus:ring-2 focus:ring-blue-500"
         />
         <button
           onClick={sendMessage}

@@ -6,6 +6,7 @@ import com.chung.webrtc.chat.service.ChatService;
 import com.chung.webrtc.chat.service.ChatSessionRegistry;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -27,12 +28,8 @@ public class ChatSocketHandler extends TextWebSocketHandler {
     private final ChatSessionRegistry chatSessionRegistry;
     private final ObjectMapper mapper = new ObjectMapper();
 
-    /** conversationId -> sessions (nhóm WS trong từng cuộc trò chuyện) */
     private final Map<String, Set<WebSocketSession>> roomSessions = new ConcurrentHashMap<>();
 
-    /**
-     * 📩 Khi nhận tin nhắn WS
-     */
     @Override
     protected void handleTextMessage(WebSocketSession session, TextMessage message) {
         try {
@@ -42,6 +39,8 @@ public class ChatSocketHandler extends TextWebSocketHandler {
             switch (type) {
                 case "join" -> handleJoin(session, msg);
                 case "chat" -> handleChat(session, msg);
+                case "typing" -> handleTyping(session, msg);
+                case "read-update" -> handleReadUpdate(session, msg); // 🆕
                 default -> log.warn("⚠️ Unknown WS message type: {}", type);
             }
         } catch (Exception e) {
@@ -49,67 +48,125 @@ public class ChatSocketHandler extends TextWebSocketHandler {
         }
     }
 
-    /**
-     * 👥 Khi user join vào 1 cuộc trò chuyện (conversation)
-     */
-    private void handleJoin(WebSocketSession session, JsonNode msg) {
+    /** 👥 Khi user join conversation */
+    private void handleJoin(WebSocketSession session, JsonNode msg) throws IOException {
         String conversationId = msg.path("conversationId").asText();
-        String email = msg.path("email").asText();
+        String token = extractToken(session);
+        String email = jwtService.extractUsername(token);
+
+        if (conversationId == null || conversationId.isBlank()) return;
 
         roomSessions.computeIfAbsent(conversationId, k -> ConcurrentHashMap.newKeySet()).add(session);
         session.getAttributes().put("conversationId", conversationId);
         session.getAttributes().put("email", email);
 
+        List<Message> history = chatService.getMessages(conversationId);
+        ObjectNode histMsg = mapper.createObjectNode();
+        histMsg.put("type", "chat-history");
+        ArrayNode arr = histMsg.putArray("messages");
+        history.forEach(m -> {
+            ObjectNode item = arr.addObject();
+            item.put("sender", m.getSender());
+            item.put("message", m.getContent());
+            item.put("timestamp", m.getTimestamp().toString());
+        });
+        session.sendMessage(new TextMessage(histMsg.toString()));
+
         log.info("🟢 [{}] {} joined conversation {}", session.getId(), email, conversationId);
     }
 
-    /**
-     * 💬 Khi nhận tin nhắn chat
-     */
+    /** 💬 Nhận message chat */
     private void handleChat(WebSocketSession session, JsonNode msg) {
-        String conversationId = msg.path("conversationId").asText();
-        String sender = msg.path("sender").asText();
-        String content = msg.path("message").asText();
+        try {
+            String conversationId = msg.path("conversationId").asText();
+            String token = extractToken(session);
+            String sender = jwtService.extractUsername(token);
+            String content = msg.path("message").asText();
 
-        // Lưu message vào DB
-        Message saved = chatService.saveMessage(conversationId, sender, content);
+            if (conversationId == null || content == null || content.isBlank()) return;
 
-        // Gửi tin nhắn tới tất cả session trong cuộc trò chuyện
-        ObjectNode node = mapper.createObjectNode();
-        node.put("type", "chat");
-        node.put("conversationId", conversationId);
-        node.put("sender", sender);
-        node.put("message", content);
-        node.put("timestamp", saved.getTimestamp().toString());
+            Message saved = chatService.saveMessage(conversationId, sender, content);
 
-        String json = node.toString();
-        roomSessions.getOrDefault(conversationId, Set.of()).forEach(sess -> {
-            try {
-                sess.sendMessage(new TextMessage(json));
-            } catch (Exception ignored) {}
-        });
+            ObjectNode node = mapper.createObjectNode();
+            node.put("type", "chat");
+            node.put("conversationId", conversationId);
+            node.put("sender", sender);
+            node.put("message", content);
+            node.put("timestamp", saved.getTimestamp().toString());
 
-        log.info("💬 [{}] {}: {}", conversationId, sender, content);
+            String json = node.toString();
+            roomSessions.getOrDefault(conversationId, Set.of()).forEach(sess -> {
+                try {
+                    if (sess.isOpen()) sess.sendMessage(new TextMessage(json));
+                } catch (IOException ignored) {}
+            });
+
+            ObjectNode notify = mapper.createObjectNode();
+            notify.put("type", "new-message");
+            notify.put("conversationId", conversationId);
+            notify.put("from", sender);
+            notify.put("content", content);
+            notify.put("timestamp", saved.getTimestamp().toString());
+            chatSessionRegistry.broadcastToAll(notify.toString());
+
+            log.info("💬 [{}] {}: {}", conversationId, sender, content);
+        } catch (Exception e) {
+            log.error("❌ handleChat error: {}", e.getMessage());
+        }
     }
 
-    /**
-     * 🟢 Khi kết nối WebSocket được thiết lập
-     */
+    /** ✍️ Khi user đang nhập */
+    private void handleTyping(WebSocketSession session, JsonNode msg) {
+        String conversationId = msg.path("conversationId").asText();
+        String token = extractToken(session);
+        String sender = jwtService.extractUsername(token);
+
+        ObjectNode node = mapper.createObjectNode();
+        node.put("type", "typing");
+        node.put("from", sender);
+        node.put("conversationId", conversationId);
+
+        roomSessions.getOrDefault(conversationId, Set.of()).forEach(sess -> {
+            try {
+                if (sess.isOpen() && sess != session) {
+                    sess.sendMessage(new TextMessage(node.toString()));
+                }
+            } catch (IOException ignored) {}
+        });
+    }
+
+    /** 👁️ Khi user đọc conversation */
+    private void handleReadUpdate(WebSocketSession session, JsonNode msg) {
+        try {
+            String conversationId = msg.path("conversationId").asText();
+            String token = extractToken(session);
+            String reader = jwtService.extractUsername(token);
+
+            chatService.markAsRead(conversationId, reader);
+
+            ObjectNode event = mapper.createObjectNode();
+            event.put("type", "read-update");
+            event.put("conversationId", conversationId);
+            event.put("reader", reader);
+
+            chatSessionRegistry.broadcastToAll(event.toString());
+            log.info("👁️ {} read conversation {}", reader, conversationId);
+        } catch (Exception e) {
+            log.error("❌ handleReadUpdate error: {}", e.getMessage());
+        }
+    }
+
+    // --- lifecycle & helpers ---
+
     @Override
     public void afterConnectionEstablished(WebSocketSession session) {
         try {
-            String token = session.getUri().getQuery().replace("token=", "");
+            String token = extractToken(session);
             String email = jwtService.extractUsername(token);
-
             session.getAttributes().put("email", email);
             chatSessionRegistry.register(email, session);
-
-            // 🧠 Phát sự kiện user-joined cho toàn hệ thống
-            broadcastOnlineStatus("user-joined", email);
-
-            // 📤 Gửi danh sách user online cho client mới
+            broadcastOnlineStatus("user-status", email);
             sendOnlineUsersToClient(session);
-
             log.info("✅ WebSocket connected: {} ({})", email, session.getId());
         } catch (Exception e) {
             log.error("❌ Error establishing WS connection: {}", e.getMessage());
@@ -117,44 +174,37 @@ public class ChatSocketHandler extends TextWebSocketHandler {
         }
     }
 
-    /**
-     * 🔴 Khi người dùng đóng kết nối
-     */
     @Override
     public void afterConnectionClosed(WebSocketSession session, CloseStatus status) {
         String email = (String) session.getAttributes().get("email");
         if (email != null) {
             chatSessionRegistry.unregister(email, session);
-
-            // 🧠 Phát sự kiện user-left
-            broadcastOnlineStatus("user-left", email);
-
-            // 📤 Cập nhật danh sách user online cho toàn hệ thống
+            broadcastOnlineStatus("user-status", email);
             broadcastOnlineList();
-
             log.info("🔻 [{}] {} disconnected", session.getId(), email);
         }
     }
 
-    /**
-     * 📡 Gửi danh sách user online đến toàn bộ client
-     */
+    private String extractToken(WebSocketSession session) {
+        String query = Objects.requireNonNull(session.getUri()).getQuery();
+        if (query != null && query.startsWith("token=")) {
+            return query.substring("token=".length());
+        }
+        throw new IllegalArgumentException("Missing JWT token");
+    }
+
     private void broadcastOnlineList() {
         try {
             var msg = mapper.createObjectNode();
             msg.put("type", "online-users");
             var arr = msg.putArray("users");
             chatSessionRegistry.getOnlineUsers().forEach(arr::add);
-
             chatSessionRegistry.broadcastToAll(msg.toString());
         } catch (Exception e) {
             log.error("❌ Failed to broadcast online list", e);
         }
     }
 
-    /**
-     * 📤 Gửi danh sách user online tới client mới connect
-     */
     private void sendOnlineUsersToClient(WebSocketSession session) {
         try {
             var msg = mapper.createObjectNode();
@@ -163,20 +213,22 @@ public class ChatSocketHandler extends TextWebSocketHandler {
             chatSessionRegistry.getOnlineUsers().forEach(arr::add);
             session.sendMessage(new TextMessage(msg.toString()));
         } catch (IOException e) {
-            log.error("❌ Failed to send online users to {}", session.getId(), e);
+            log.error("❌ Failed to send online users", e);
         }
     }
 
-    /**
-     * 🧠 Gửi sự kiện user join/left đến toàn hệ thống
-     */
     private void broadcastOnlineStatus(String event, String email) {
         try {
             var msg = mapper.createObjectNode();
             msg.put("type", event);
             msg.put("email", email);
+            boolean online = chatSessionRegistry.getOnlineUsers().contains(email);
+            msg.put("online", online);
+            if (!online) {
+                var lastSeen = chatSessionRegistry.getLastSeen(email);
+                msg.put("lastSeen", lastSeen != null ? lastSeen.toString() : "");
+            }
             chatSessionRegistry.broadcastToAll(msg.toString());
-            log.info("📣 Broadcast {} for {}", event, email);
         } catch (Exception e) {
             log.error("❌ Failed to broadcast {}", event, e);
         }

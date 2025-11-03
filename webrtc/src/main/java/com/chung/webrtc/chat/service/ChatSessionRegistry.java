@@ -22,15 +22,14 @@ public class ChatSessionRegistry {
     // email -> last active time
     private final Map<String, Instant> lastSeenMap = new ConcurrentHashMap<>();
 
+    /** 🟢 Khi user connect WS */
     public synchronized void register(String email, WebSocketSession session) {
         userSessions.computeIfAbsent(email, k -> ConcurrentHashMap.newKeySet()).add(session);
         lastSeenMap.put(email, Instant.now());
         log.info("✅ [{}] Registered new session {} for user {}", Instant.now(), session.getId(), email);
     }
 
-    /**
-     * Remove session when user disconnects
-     */
+    /** 🔴 Khi user disconnect */
     public synchronized void unregister(String email, WebSocketSession session) {
         if (email == null || session == null) return;
         Set<WebSocketSession> sessions = userSessions.get(email);
@@ -45,30 +44,22 @@ public class ChatSessionRegistry {
         }
     }
 
-    /**
-     * Return all active sessions of a user
-     */
+    /** 🔹 Lấy tất cả session của user */
     public Set<WebSocketSession> getSessions(String email) {
         return userSessions.getOrDefault(email, Collections.emptySet());
     }
 
-    /**
-     * Return all currently online users
-     */
+    /** 🔹 Lấy danh sách user online */
     public Set<String> getOnlineUsers() {
         return userSessions.keySet();
     }
 
-    /**
-     * Return last seen timestamp (if offline)
-     */
+    /** 🔹 Lấy thời gian last seen */
     public Instant getLastSeen(String email) {
         return lastSeenMap.get(email);
     }
 
-    /**
-     * Broadcast message to all active users (system-wide event)
-     */
+    /** 🔹 Broadcast message tới tất cả user đang online */
     public void broadcastToAll(String message) {
         userSessions.values().forEach(sessions -> {
             sessions.forEach(session -> {
@@ -83,9 +74,7 @@ public class ChatSessionRegistry {
         });
     }
 
-    /**
-     * Remove all users (if system restart)
-     */
+    /** 🔹 Dọn sạch cache */
     public void clearAll() {
         userSessions.clear();
         lastSeenMap.clear();

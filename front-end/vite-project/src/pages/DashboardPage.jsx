@@ -207,7 +207,7 @@ const DashboardPage = () => {
         </div>
       </header>
 
-      {/* MAIN */}
+            {/* MAIN */}
       <main className="flex-1 flex flex-col items-center justify-center mt-8">
         <div className="text-5xl font-semibold mb-2">{formatTime(time)}</div>
         <div className="text-gray-500 mb-10">{formatDate(time)}</div>
@@ -235,6 +235,15 @@ const DashboardPage = () => {
           >
             <FaCalendarAlt className="text-3xl mb-2" />
             <span className="font-medium text-sm">Schedule</span>
+          </button>
+
+          {/* 🔹 NEW: Chat button */}
+          <button
+            onClick={() => navigate("/chat")}
+            className="flex flex-col items-center justify-center w-28 h-28 rounded-full bg-pink-50 hover:bg-pink-100 text-pink-700 shadow-md transition"
+          >
+            💬
+            <span className="font-medium text-sm mt-1">Chat</span>
           </button>
         </div>
 

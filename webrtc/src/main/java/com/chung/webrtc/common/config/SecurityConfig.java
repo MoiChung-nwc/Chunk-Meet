@@ -36,7 +36,8 @@ public class SecurityConfig {
                         .requestMatchers("/api/auth/**",
                                 "/api/guest/**",
                                 "/api/meetings/join/**",
-                                "/ws/**").permitAll()
+                                "/ws/**",
+                                "/api/chat/**").permitAll()
                         .requestMatchers("/api/admin/**").hasRole("ADMIN")
                         .anyRequest().authenticated()
                 )
