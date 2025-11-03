@@ -31,12 +31,12 @@ public class SignalingController extends TextWebSocketHandler {
 
     @Override
     public void afterConnectionEstablished(WebSocketSession session) {
-        String email = (String) session.getAttributes().get("username");
+        String email = (String) session.getAttributes().get("email");
         if (email != null) {
             sessionRegistry.registerUser(email, session);
             log.info("✅ [SIGNALING] Connected: {}", email);
         } else {
-            log.warn("⚠️ [SIGNALING] Connection missing username attribute");
+            log.warn("⚠️ [SIGNALING] Connection missing email attribute");
         }
     }
 
@@ -67,12 +67,12 @@ public class SignalingController extends TextWebSocketHandler {
 
                 // 👋 Client thông báo đã join signaling
                 case "join" -> {
-                    String username = (String) session.getAttributes().get("username");
-                    if (username != null) {
-                        sessionRegistry.registerUser(username, session);
-                        log.info("👋 [SIGNALING] {} joined via JWT", username);
+                    String email = (String) session.getAttributes().get("email");
+                    if (email != null) {
+                        sessionRegistry.registerUser(email, session);
+                        log.info("👋 [SIGNALING] {} joined via JWT", email);
                     } else {
-                        log.warn("⚠️ [SIGNALING] join received but username missing in session");
+                        log.warn("⚠️ [SIGNALING] join received but email missing in session");
                     }
                 }
 
@@ -129,12 +129,12 @@ public class SignalingController extends TextWebSocketHandler {
 
     @Override
     public void afterConnectionClosed(WebSocketSession session, CloseStatus status) {
-        String email = (String) session.getAttributes().get("username");
+        String email = (String) session.getAttributes().get("email");
         if (email != null) {
             sessionRegistry.removeUser(email, session);
             log.info("🔴 [SIGNALING] {} disconnected ({})", email, status);
         } else {
-            log.warn("⚠️ [SIGNALING] Session closed without username attr ({})", status);
+            log.warn("⚠️ [SIGNALING] Session closed without email attr ({})", status);
         }
     }
 }

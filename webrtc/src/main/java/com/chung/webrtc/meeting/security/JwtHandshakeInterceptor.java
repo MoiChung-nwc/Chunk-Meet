@@ -6,6 +6,7 @@ import io.jsonwebtoken.ExpiredJwtException;
 import io.jsonwebtoken.JwtException;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.server.ServerHttpRequest;
 import org.springframework.http.server.ServerHttpResponse;
 import org.springframework.http.server.ServletServerHttpRequest;
@@ -31,18 +32,21 @@ public class JwtHandshakeInterceptor implements HandshakeInterceptor {
     ) {
         if (!(request instanceof ServletServerHttpRequest servletRequest)) {
             log.warn("❌ Not a servlet request");
+            response.setStatusCode(HttpStatus.BAD_REQUEST);
             return false;
         }
 
         var http = servletRequest.getServletRequest();
         String token = http.getParameter("token");
+
         if (token == null || token.isBlank()) {
-            log.warn("❌ Missing token in handshake query");
+            log.warn("🚫 Missing token in WS handshake query");
+            response.setStatusCode(HttpStatus.UNAUTHORIZED);
             return false;
         }
 
         try {
-            // ✅ Parse token (chấp nhận token expired)
+            // ✅ Parse token (accept expired)
             Claims claims;
             try {
                 claims = jwtService.parseClaims(token);
@@ -51,22 +55,26 @@ public class JwtHandshakeInterceptor implements HandshakeInterceptor {
                 claims = e.getClaims();
             }
 
-            String username = claims.getSubject();
-            if (username == null || username.isBlank()) {
-                log.warn("❌ No subject in token");
+            String email = claims.getSubject();
+            if (email == null || email.isBlank()) {
+                log.warn("🚫 Invalid token: no subject found");
+                response.setStatusCode(HttpStatus.UNAUTHORIZED);
                 return false;
             }
 
-            // ✅ Save user info to WS session
-            attributes.put("username", username);
-            log.info("✅ WebSocket handshake OK for user: {}", username);
+            // ✅ Lưu thông tin user vào session attribute
+            attributes.put("email", email);
+            attributes.put("token", token);
+            log.info("✅ WebSocket handshake OK for user: {}", email);
             return true;
 
         } catch (JwtException e) {
             log.error("🚫 Invalid JWT during handshake: {}", e.getMessage());
+            response.setStatusCode(HttpStatus.UNAUTHORIZED);
             return false;
         } catch (Exception e) {
             log.error("🚫 Unexpected error validating WS token: {}", e.getMessage());
+            response.setStatusCode(HttpStatus.INTERNAL_SERVER_ERROR);
             return false;
         }
     }

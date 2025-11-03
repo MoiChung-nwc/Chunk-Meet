@@ -7,12 +7,15 @@ import com.chung.webrtc.meeting.dto.response.MeetingResponse;
 import com.chung.webrtc.meeting.entity.Meeting;
 import com.chung.webrtc.meeting.service.MeetingService;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.Authentication;
 import org.springframework.web.bind.annotation.*;
 
+import java.util.Map;
 import java.util.Objects;
 
+@Slf4j
 @RestController
 @RequestMapping("/api/meetings")
 @RequiredArgsConstructor
@@ -20,6 +23,10 @@ public class MeetingController {
 
     private final MeetingService meetingService;
     private final PermissionChecker permissionChecker;
+
+    private String norm(String code) {
+        return code == null ? null : code.trim().toLowerCase();
+    }
 
     /** 🟢 Tạo phòng họp mới */
     @PostMapping
@@ -30,6 +37,7 @@ public class MeetingController {
         permissionChecker.checkPermission("CREATE_MEETING");
         String email = authentication.getName();
 
+        log.info("🟢 {} is creating a new meeting...", email);
         MeetingResponse res = meetingService.createMeeting(email, req);
         return ResponseEntity.ok(res);
     }
@@ -42,12 +50,17 @@ public class MeetingController {
     ) {
         permissionChecker.checkPermission("JOIN_MEETING");
         String email = authentication.getName();
+        String code = norm(req.getMeetingCode());
 
-        boolean ok = meetingService.joinMeeting(req.getMeetingCode(), email);
-        if (!ok)
-            return ResponseEntity.badRequest().body("❌ Meeting not found or already ended");
+        boolean ok = meetingService.joinMeeting(code, email);
+        if (!ok) {
+            log.warn("🚫 {} failed to join meeting {}", email, code);
+            return ResponseEntity.badRequest()
+                    .body(Map.of("success", false, "message", "❌ Meeting not found or already ended"));
+        }
 
-        return ResponseEntity.ok("✅ Joined meeting successfully");
+        log.info("✅ {} joined meeting {}", email, code);
+        return ResponseEntity.ok(Map.of("success", true, "message", "✅ Joined meeting successfully"));
     }
 
     /** 👋 Rời phòng */
@@ -57,8 +70,11 @@ public class MeetingController {
             @RequestBody JoinMeetingRequest req
     ) {
         String email = authentication.getName();
-        meetingService.leaveMeeting(req.getMeetingCode(), email);
-        return ResponseEntity.ok("👋 Left meeting successfully");
+        String code = norm(req.getMeetingCode());
+        meetingService.leaveMeeting(code, email);
+        log.info("👋 {} left meeting {}", email, code);
+
+        return ResponseEntity.ok(Map.of("success", true, "message", "👋 Left meeting successfully"));
     }
 
     /** 🔴 Kết thúc phòng họp */
@@ -69,39 +85,43 @@ public class MeetingController {
     ) {
         permissionChecker.checkPermission("END_MEETING");
         String email = authentication.getName();
+        String normCode = norm(code);
 
-        boolean ok = meetingService.endMeeting(code, email);
-        if (!ok)
-            return ResponseEntity.status(403).body("🚫 Not allowed to end this meeting");
+        log.info("🟥 {} requests to end meeting {}", email, normCode);
+        boolean ok = meetingService.endMeeting(normCode, email);
+        if (!ok) {
+            return ResponseEntity.status(403)
+                    .body(Map.of("success", false, "message", "🚫 Not allowed to end this meeting"));
+        }
 
-        return ResponseEntity.ok("✅ Meeting ended successfully");
+        log.info("✅ Meeting {} ended successfully by {}", normCode, email);
+        return ResponseEntity.ok(Map.of("success", true, "message", "✅ Meeting ended successfully"));
     }
 
-    /**
-     * 🔍 Lấy thông tin phòng & tự động join nếu user truy cập qua link
-     * (dành cho frontend route /group/{code})
-     */
+    /** 🔍 Lấy thông tin phòng & auto-join nếu user mở link */
     @GetMapping("/{code}")
     public ResponseEntity<?> getAndAutoJoinMeeting(
             Authentication authentication,
             @PathVariable String code
     ) {
         String email = authentication.getName();
+        String normCode = norm(code);
+        log.info("🔍 {} is requesting meeting info for {}", email, normCode);
 
-        return meetingService.findByCode(code)
+        return meetingService.findByCode(normCode)
                 .map(meeting -> {
-                    // Kiểm tra trạng thái
                     if (meeting.getStatus() == Meeting.MeetingStatus.ENDED) {
-                        return ResponseEntity.badRequest().body("❌ Meeting has ended");
+                        log.warn("⚠️ Meeting {} has already ended", normCode);
+                        return ResponseEntity.badRequest()
+                                .body(Map.of("success", false, "message", "❌ Meeting has ended"));
                     }
 
-                    // ✅ Tự động thêm user vào participants nếu chưa có
                     if (!meeting.getParticipants().contains(email)) {
                         meeting.getParticipants().add(email);
                         meetingService.save(meeting);
+                        log.info("🟢 Auto-added {} into meeting {}", email, normCode);
                     }
 
-                    // ✅ Trả về thông tin phòng
                     MeetingResponse response = MeetingResponse.builder()
                             .meetingCode(meeting.getMeetingCode())
                             .joinLink(String.format("%s/group/%s", "http://localhost:5173", meeting.getMeetingCode()))
@@ -113,6 +133,10 @@ public class MeetingController {
 
                     return ResponseEntity.ok(response);
                 })
-                .orElse(ResponseEntity.notFound().build());
+                .orElseGet(() -> {
+                    log.warn("❌ Meeting {} not found", normCode);
+                    return ResponseEntity.status(404)
+                            .body(Map.of("success", false, "message", "❌ Meeting not found"));
+                });
     }
 }

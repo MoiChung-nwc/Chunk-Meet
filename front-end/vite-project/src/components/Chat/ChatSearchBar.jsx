@@ -1,6 +1,11 @@
+import React, { useState, useEffect } from "react";
+
 const ChatSearchBar = ({ onSearch }) => {
   const [query, setQuery] = useState("");
-  useEffect(() => onSearch?.(query), [query]);
+
+  useEffect(() => {
+    onSearch?.(query);
+  }, [query]);
 
   return (
     <div className="p-3 border-b border-gray-100">
@@ -14,4 +19,5 @@ const ChatSearchBar = ({ onSearch }) => {
     </div>
   );
 };
+
 export default ChatSearchBar;

@@ -23,7 +23,7 @@ public class CallSocketHandler extends TextWebSocketHandler {
 
     @Override
     public void afterConnectionEstablished(WebSocketSession session) {
-        String email = (String) session.getAttributes().get("username");
+        String email = (String) session.getAttributes().get("email");
         if (email != null) {
             sessionRegistry.registerUser(email, session);
             log.info("✅ User {} connected to /ws/call", email);
@@ -96,7 +96,7 @@ public class CallSocketHandler extends TextWebSocketHandler {
 
     @Override
     public void afterConnectionClosed(WebSocketSession session, CloseStatus status) {
-        String email = (String) session.getAttributes().get("username");
+        String email = (String) session.getAttributes().get("email");
         if (email != null) {
             // giữ removeUser (xóa session) — sessionRegistry sẽ track các session của user
             sessionRegistry.removeUser(email, session);

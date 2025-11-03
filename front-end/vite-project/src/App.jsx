@@ -13,14 +13,10 @@ export default function App() {
     <BrowserRouter>
       <AuthProvider>
         <Routes>
-          {/* 👉 Redirect mặc định */}
           <Route path="/" element={<Navigate to="/login" replace />} />
-
-          {/* 🌐 Public routes */}
           <Route path="/login" element={<LoginPage />} />
           <Route path="/register" element={<RegisterPage />} />
 
-          {/* 🔒 Protected routes */}
           <Route
             path="/dashboard"
             element={
@@ -30,7 +26,6 @@ export default function App() {
             }
           />
 
-          {/* 📹 1-1 Video Call */}
           <Route
             path="/videocall"
             element={
@@ -40,7 +35,6 @@ export default function App() {
             }
           />
 
-          {/* 👥 Group Call (theo meetingCode) */}
           <Route
             path="/group/:meetingCode"
             element={
@@ -59,7 +53,6 @@ export default function App() {
             }
           />
 
-          {/* ❌ 404 fallback */}
           <Route path="*" element={<Navigate to="/dashboard" replace />} />
         </Routes>
       </AuthProvider>

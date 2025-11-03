@@ -10,8 +10,10 @@ import io.jsonwebtoken.Jwts;
 import io.jsonwebtoken.SignatureAlgorithm;
 import io.jsonwebtoken.security.Keys;
 import jakarta.servlet.http.HttpServletRequest;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
+import org.springframework.web.socket.WebSocketSession;
 
 import java.security.Key;
 import java.util.*;
@@ -19,6 +21,7 @@ import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 @Service
+@Slf4j
 public class JwtService {
     private final Key key;
     private final long jwtExpirationMs;
@@ -122,5 +125,25 @@ public class JwtService {
     public <T> T extractClaim(String token, java.util.function.Function<Claims, T> claimsResolver) {
         final Claims claims = parseClaims(token);
         return claimsResolver.apply(claims);
+    }
+
+    public String extractEmailFromSession(WebSocketSession session) {
+        // Ưu tiên lấy từ attribute
+        Object emailAttr = session.getAttributes().get("email");
+        if (emailAttr != null) return emailAttr.toString();
+
+        // Fallback: lấy từ token trong query param
+        try {
+            String query = session.getUri().getQuery();
+            if (query != null && query.startsWith("token=")) {
+                String token = query.substring(6);
+                if (isTokenValid(token)) {
+                    return extractUsername(token);
+                }
+            }
+        } catch (Exception e) {
+            log.warn("⚠️ extractEmailFromSession failed: {}", e.getMessage());
+        }
+        return null;
     }
 }

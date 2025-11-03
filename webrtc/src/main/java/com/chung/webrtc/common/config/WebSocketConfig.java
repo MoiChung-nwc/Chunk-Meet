@@ -1,5 +1,6 @@
 package com.chung.webrtc.common.config;
 
+import com.chung.webrtc.chat.socket.ChatSocketHandler;
 import com.chung.webrtc.meeting.security.JwtHandshakeInterceptor;
 import com.chung.webrtc.meeting.socket.CallSocketHandler;
 import com.chung.webrtc.meeting.controller.SignalingController;
@@ -31,6 +32,8 @@ public class WebSocketConfig implements WebSocketConfigurer {
 
     private final MeetingSocketHandler meetingSocketHandler;
 
+    private final ChatSocketHandler chatSocketHandler;
+
     @Override
     public void registerWebSocketHandlers(WebSocketHandlerRegistry registry) {
         log.info("🔧 Registering WebSocket endpoints (pure WebSocket mode)...");
@@ -49,6 +52,10 @@ public class WebSocketConfig implements WebSocketConfigurer {
         log.info("✅ WebSocket endpoints registered successfully without SockJS");
 
         registry.addHandler(meetingSocketHandler, "/ws/meeting")
+                .addInterceptors(jwtHandshakeInterceptor)
+                .setAllowedOriginPatterns("*");
+
+        registry.addHandler(chatSocketHandler, "/ws/chat")
                 .addInterceptors(jwtHandshakeInterceptor)
                 .setAllowedOriginPatterns("*");
     }

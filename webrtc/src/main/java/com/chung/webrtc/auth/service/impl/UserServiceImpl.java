@@ -6,6 +6,7 @@ import com.chung.webrtc.auth.entity.User;
 import com.chung.webrtc.auth.mapper.UserMapper;
 import com.chung.webrtc.auth.repository.RefreshTokenRepository;
 import com.chung.webrtc.auth.repository.UserRepository;
+import com.chung.webrtc.auth.service.JwtService;
 import com.chung.webrtc.auth.service.UserService;
 import com.chung.webrtc.common.exception.AppException;
 import com.chung.webrtc.common.exception.ErrorCode;
@@ -15,12 +16,17 @@ import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.util.Collections;
+import java.util.List;
+import java.util.stream.Collectors;
+
 @Service
 @RequiredArgsConstructor
 public class UserServiceImpl implements UserService {
     private final UserRepository userRepository;
     private final RefreshTokenRepository refreshTokenRepository;
     private final UserMapper userMapper;
+    private final JwtService jwtService;
 
     private User getAuthenticatedUser() {
         Authentication auth = SecurityContextHolder.getContext().getAuthentication();
@@ -50,5 +56,26 @@ public class UserServiceImpl implements UserService {
         User user = getAuthenticatedUser();
         refreshTokenRepository.deleteByUser(user);
         userRepository.delete(user);
+    }
+
+    @Override
+    public List<UserResponse> searchUsers(String keyword, String authHeader) {
+        String token = authHeader.replace("Bearer ", "");
+        String currentEmail = jwtService.extractUsername(token);
+
+        if (keyword == null || keyword.isBlank()) {
+            return Collections.emptyList();
+        }
+
+        List<User> users = userRepository.searchUsersExceptCurrent(keyword, currentEmail);
+
+        return users.stream()
+                .map(u -> UserResponse.builder()
+                        .id(u.getId())
+                        .email(u.getEmail())
+                        .firstName(u.getFirstName())
+                        .lastName(u.getLastName())
+                        .build())
+                .collect(Collectors.toList());
     }
 }

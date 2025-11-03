@@ -13,7 +13,7 @@ import java.util.concurrent.ConcurrentHashMap;
 @Component
 public class MeetingSessionRegistry {
 
-    /** meetingCode -> participants (email -> session) */
+    /** meetingCode -> (email -> session) */
     private final Map<String, Map<String, WebSocketSession>> rooms = new ConcurrentHashMap<>();
 
     /** sessionId -> meetingCode */
@@ -22,74 +22,135 @@ public class MeetingSessionRegistry {
     /** sessionId -> email */
     private final Map<String, String> sessionToEmail = new ConcurrentHashMap<>();
 
-    /** 🟢 Thêm user vào phòng */
+    /** 🟢 Thêm user vào phòng (thread-safe, idempotent) */
     public void addUserToRoom(String meetingCode, String email, WebSocketSession session) {
+        if (meetingCode == null || email == null) {
+            log.warn("🚫 Cannot add user — missing meetingCode or email");
+            return;
+        }
+
         rooms.computeIfAbsent(meetingCode, k -> new ConcurrentHashMap<>()).put(email, session);
         sessionToRoom.put(session.getId(), meetingCode);
         sessionToEmail.put(session.getId(), email);
+
         log.info("✅ User {} joined meeting {}", email, meetingCode);
     }
 
-    /** 🔴 Xoá user khỏi phòng */
+    /** 🔴 Xóa user khỏi phòng (safe & defensive) */
     public void removeUser(WebSocketSession session) {
-        String meetingCode = sessionToRoom.remove(session.getId());
-        String email = sessionToEmail.remove(session.getId());
+        if (session == null) return;
 
-        if (meetingCode != null && rooms.containsKey(meetingCode)) {
-            rooms.get(meetingCode).remove(email);
-            if (rooms.get(meetingCode).isEmpty()) {
+        String sessionId = session.getId();
+        String meetingCode = sessionToRoom.remove(sessionId);
+        String email = sessionToEmail.remove(sessionId);
+
+        if (meetingCode == null || email == null) {
+            log.warn("⚠️ removeUser called for unknown session {}", sessionId);
+            return;
+        }
+
+        Map<String, WebSocketSession> participants = rooms.get(meetingCode);
+        if (participants != null) {
+            participants.remove(email);
+            log.info("❌ {} left meeting {}", email, meetingCode);
+
+            if (participants.isEmpty()) {
                 rooms.remove(meetingCode);
                 log.info("🧹 Removed empty room {}", meetingCode);
             }
-            log.info("❌ User {} left meeting {}", email, meetingCode);
+        }
+    }
+
+    /** 🧱 Thread-safe gửi message */
+    private void safeSend(WebSocketSession session, String message) {
+        if (session == null) return;
+        synchronized (session) {
+            try {
+                if (session.isOpen()) {
+                    session.sendMessage(new TextMessage(message));
+                } else {
+                    log.debug("⚠️ Tried to send to closed session {}", session.getId());
+                    cleanupSession(session);
+                }
+            } catch (IOException e) {
+                log.warn("⚠️ Failed to send message to {}: {}", session.getId(), e.getMessage());
+                cleanupSession(session);
+            } catch (IllegalStateException e) {
+                log.warn("⚠️ WS busy for {}: {}", session.getId(), e.getMessage());
+            }
         }
     }
 
     /** 📡 Broadcast đến tất cả trong phòng (trừ 1 người nếu có) */
     public void broadcast(String meetingCode, String message, WebSocketSession exclude) {
-        Map<String, WebSocketSession> participants = rooms.getOrDefault(meetingCode, Collections.emptyMap());
-        participants.values().forEach(session -> {
-            if (session.isOpen() && !session.equals(exclude)) {
-                try {
-                    session.sendMessage(new TextMessage(message));
-                } catch (IOException e) {
-                    log.error("❌ Error sending broadcast to {}", session.getId(), e);
-                }
+        Map<String, WebSocketSession> participants = rooms.get(meetingCode);
+        if (participants == null || participants.isEmpty()) return;
+
+        participants.forEach((email, session) -> {
+            if (!session.equals(exclude)) {
+                safeSend(session, message);
             }
         });
     }
 
-    /** 🎯 Gửi tin nhắn đến 1 người cụ thể theo email */
+    /** 🎯 Gửi tin nhắn riêng cho 1 người theo email */
     public void sendToUser(String meetingCode, String toEmail, String message) {
         WebSocketSession target = Optional.ofNullable(rooms.get(meetingCode))
                 .map(map -> map.get(toEmail))
                 .orElse(null);
+
         if (target != null && target.isOpen()) {
-            try {
-                target.sendMessage(new TextMessage(message));
-                log.info("📨 Sent message to {} in meeting {}", toEmail, meetingCode);
-            } catch (IOException e) {
-                log.error("❌ Error sending message to {}: {}", toEmail, e.getMessage());
-            }
+            safeSend(target, message);
+            log.debug("📨 Sent message to {} in [{}]", toEmail, meetingCode);
         } else {
-            log.warn("⚠️ Cannot send to {}, not connected", toEmail);
+            log.debug("⚠️ Cannot send to {}, not connected or closed", toEmail);
         }
     }
 
     /** 👥 Lấy danh sách participants trong phòng */
     public Set<String> getParticipants(String meetingCode) {
-        return rooms.containsKey(meetingCode)
-                ? new HashSet<>(rooms.get(meetingCode).keySet())
-                : Collections.emptySet();
+        if (meetingCode == null) return Collections.emptySet();
+        Map<String, WebSocketSession> map = rooms.get(meetingCode);
+        return map != null ? new HashSet<>(map.keySet()) : Collections.emptySet();
     }
 
     /** 🔍 Lấy email từ session */
     public String getEmail(WebSocketSession session) {
-        return sessionToEmail.get(session.getId());
+        return session != null ? sessionToEmail.get(session.getId()) : null;
     }
 
     /** 🔍 Lấy meetingCode từ session */
     public String getMeetingCode(WebSocketSession session) {
-        return sessionToRoom.get(session.getId());
+        return session != null ? sessionToRoom.get(session.getId()) : null;
+    }
+
+    /** 💥 Đóng toàn bộ kết nối & cleanup phòng */
+    public void closeRoom(String meetingCode) {
+        Map<String, WebSocketSession> participants = rooms.remove(meetingCode);
+        if (participants != null) {
+            participants.forEach((email, session) -> {
+                try {
+                    if (session.isOpen()) session.close();
+                    cleanupSession(session);
+                } catch (IOException e) {
+                    log.error("❌ Error closing session {}: {}", session.getId(), e.getMessage());
+                }
+            });
+            log.info("💥 Closed room {}", meetingCode);
+        }
+    }
+
+    /** 🧹 Xóa session khỏi mapping khi bị lỗi */
+    private void cleanupSession(WebSocketSession session) {
+        if (session == null) return;
+        sessionToRoom.remove(session.getId());
+        sessionToEmail.remove(session.getId());
+    }
+
+    /** 🧩 Debug: danh sách rooms đang hoạt động */
+    public Map<String, Set<String>> getActiveRooms() {
+        Map<String, Set<String>> result = new LinkedHashMap<>();
+        rooms.forEach((room, users) -> result.put(room, new HashSet<>(users.keySet())));
+        return result;
     }
 }
