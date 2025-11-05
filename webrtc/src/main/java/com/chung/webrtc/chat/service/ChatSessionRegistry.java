@@ -59,15 +59,23 @@ public class ChatSessionRegistry {
         return lastSeenMap.get(email);
     }
 
-    /** 🔹 Broadcast message tới tất cả user đang online */
+    /**
+     * 🔹 Broadcast message tới tất cả user đang online
+     * ✅ Fix lỗi TEXT_PARTIAL_WRITING (Tomcat không cho phép gửi song song)
+     */
     public void broadcastToAll(String message) {
         userSessions.values().forEach(sessions -> {
             sessions.forEach(session -> {
-                if (session.isOpen()) {
-                    try {
-                        session.sendMessage(new TextMessage(message));
-                    } catch (IOException e) {
-                        log.error("❌ Failed to broadcast message to {}", session.getId(), e);
+                synchronized (session) { // ✅ đảm bảo chỉ 1 thread gửi 1 session cùng lúc
+                    if (session.isOpen()) {
+                        try {
+                            session.sendMessage(new TextMessage(message));
+                        } catch (IllegalStateException ise) {
+                            // ❗ Tomcat ném lỗi nếu session đang gửi dở → bỏ qua
+                            log.warn("⚠️ Skipped broadcast: session {} busy -> {}", session.getId(), ise.getMessage());
+                        } catch (IOException e) {
+                            log.error("❌ Failed to broadcast message to {}: {}", session.getId(), e.getMessage());
+                        }
                     }
                 }
             });

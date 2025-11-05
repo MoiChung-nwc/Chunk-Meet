@@ -7,11 +7,20 @@ import GroupCallPage from "./pages/GroupCallPage";
 import ProtectedRoute from "./components/ProtectedRoute";
 import { AuthProvider } from "./context/AuthContext";
 import ChatPage from "./pages/ChatPage";
+import CallIntegration from "./components/Call/CallIntegration"; // ✅ thêm dòng này
 
 export default function App() {
+  const token = sessionStorage.getItem("accessToken");
+  const email =
+    sessionStorage.getItem("email") ||
+    JSON.parse(localStorage.getItem("user") || "{}").email;
+
   return (
     <BrowserRouter>
       <AuthProvider>
+        {/* ✅ CallIntegration luôn hoạt động nền để nhận incoming-call */}
+        {token && email && <CallIntegration token={token} myEmail={email} />}
+
         <Routes>
           <Route path="/" element={<Navigate to="/login" replace />} />
           <Route path="/login" element={<LoginPage />} />

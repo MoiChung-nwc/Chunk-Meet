@@ -131,7 +131,7 @@ public class SignalingController extends TextWebSocketHandler {
     public void afterConnectionClosed(WebSocketSession session, CloseStatus status) {
         String email = (String) session.getAttributes().get("email");
         if (email != null) {
-            sessionRegistry.removeUser(email, session);
+            sessionRegistry.removeUser(email, session, status);
             log.info("🔴 [SIGNALING] {} disconnected ({})", email, status);
         } else {
             log.warn("⚠️ [SIGNALING] Session closed without email attr ({})", status);

@@ -41,10 +41,9 @@ public class CallSocketHandler extends TextWebSocketHandler {
 
             switch (type) {
                 case "join" -> {
-                    // accept either {"type":"join","email":"..."} or {"type":"join","from":"..."}
-                    String email = null;
-                    if (json.has("email")) email = json.get("email").asText();
-                    else if (json.has("from")) email = json.get("from").asText();
+                    String email = json.has("email")
+                            ? json.get("email").asText()
+                            : json.has("from") ? json.get("from").asText() : null;
 
                     if (email != null) {
                         sessionRegistry.registerUser(email, session);
@@ -54,39 +53,32 @@ public class CallSocketHandler extends TextWebSocketHandler {
                     }
                 }
 
-                // support both "call" and "start-call" from frontend
                 case "call", "start-call" -> {
-                    String from = json.has("from") ? json.get("from").asText() : null;
-                    String to = json.has("to") ? json.get("to").asText() : null;
-                    if (from != null && to != null) {
-                        callService.startCall(from, to);
-                    } else {
-                        log.warn("⚠️ [CALL] call/start-call missing fields: {}", json.toString());
-                    }
+                    String from = json.path("from").asText(null);
+                    String to = json.path("to").asText(null);
+                    if (from != null && to != null) callService.startCall(from, to);
+                    else log.warn("⚠️ [CALL] call/start-call missing fields: {}", json);
                 }
 
                 case "accept-call" -> {
-                    String from = json.get("from").asText();
-                    String to = json.get("to").asText();
+                    String from = json.path("from").asText(null);
+                    String to = json.path("to").asText(null);
                     callService.acceptCall(from, to);
                 }
 
                 case "reject-call" -> {
-                    String from = json.get("from").asText();
-                    String to = json.get("to").asText();
+                    String from = json.path("from").asText(null);
+                    String to = json.path("to").asText(null);
                     callService.rejectCall(from, to);
                 }
 
                 case "hangup" -> {
-                    String from = json.get("from").asText();
-                    String to = json.get("to").asText();
+                    String from = json.path("from").asText(null);
+                    String to = json.path("to").asText(null);
                     callService.hangupCall(from, to);
                 }
 
-                default -> {
-                    // Bỏ qua signaling messages ở đây, vì chúng xử lý qua /ws/signaling
-                    log.debug("ℹ️ Ignored message type {} (handled elsewhere)", type);
-                }
+                default -> log.debug("ℹ️ Ignored message type {} (handled elsewhere)", type);
             }
 
         } catch (Exception e) {
@@ -97,10 +89,9 @@ public class CallSocketHandler extends TextWebSocketHandler {
     @Override
     public void afterConnectionClosed(WebSocketSession session, CloseStatus status) {
         String email = (String) session.getAttributes().get("email");
-        if (email != null) {
-            // giữ removeUser (xóa session) — sessionRegistry sẽ track các session của user
-            sessionRegistry.removeUser(email, session);
-            log.info("🔴 {} disconnected from /ws/call ({})", email, status);
-        }
+        if (email == null) return;
+
+        sessionRegistry.removeUser(email, session, status);
+        log.info("🔴 {} disconnected from /ws/call ({})", email, status);
     }
 }

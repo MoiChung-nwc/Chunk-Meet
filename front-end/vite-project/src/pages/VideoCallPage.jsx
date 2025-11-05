@@ -16,7 +16,7 @@ const VideoCallPage = () => {
   const [peerStream, setPeerStream] = useState(null);
 
   const userEmail = sessionStorage.getItem("email");
-  const token = sessionStorage.getItem("accessToken"); // ✅ Đồng bộ tên token
+  const token = sessionStorage.getItem("accessToken");
   const localVideoRef = useRef(null);
   const remoteVideoRef = useRef(null);
   const peerEmailRef = useRef(null);
@@ -36,7 +36,13 @@ const VideoCallPage = () => {
     if (remoteVideoRef.current) remoteVideoRef.current.srcObject = stream;
   });
 
-  // ✅ Sử dụng useSignaling đúng cách
+  // ✅ Lấy flag fromChat để biết người dùng đến từ trang Chat
+  const fromChat =
+    location.state?.fromChat === true ||
+    sessionStorage.getItem("fromChat") === "true" ||
+    location.pathname.startsWith("/chat");
+
+  // ✅ Sử dụng useSignaling
   const { send, ready: signalingReady } = useSignaling(token, onSignalingMessage);
 
   // 🧠 Xác định người gọi / người nhận
@@ -60,7 +66,7 @@ const VideoCallPage = () => {
     logger.log("[VideoCallPage] initial peerEmailRef set ->", peer);
   }, [location.state]);
 
-  // 🔄 Khởi tạo WebRTC và signaling
+  // 🔄 Khởi tạo WebRTC + signaling
   useEffect(() => {
     (async () => {
       if (!userEmail || !token) {
@@ -71,20 +77,16 @@ const VideoCallPage = () => {
 
       window.isInCall = true;
 
-      // 1️⃣ Tạo kết nối WebRTC và local stream
       await createPeerConnection();
       await initLocalStream(localVideoRef);
 
-      // 2️⃣ Đợi signaling sẵn sàng
       await signalingReady;
       setReady(true);
       readyPromise.current = Promise.resolve();
 
-      // 3️⃣ Tham gia signaling
       send({ type: "join", from: userEmail });
       logger.log("👋 Joined signaling as", userEmail);
 
-      // 4️⃣ Gửi "ready" sau 700ms
       setTimeout(sendReady, 700);
     })();
 
@@ -96,7 +98,7 @@ const VideoCallPage = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // 📤 Gửi tín hiệu "ready"
+  // 📤 Gửi tín hiệu ready
   const sendReady = async () => {
     const target = peerEmailRef.current;
     if (!target || target === userEmail) {
@@ -105,16 +107,13 @@ const VideoCallPage = () => {
       );
       return;
     }
-
-    if (!ready) {
-      await readyPromise.current;
-    }
+    if (!ready) await readyPromise.current;
 
     send({ type: "ready", from: userEmail, to: target });
     logger.log(`🟢 Sent ready from ${userEmail} → ${target}`);
   };
 
-  // 📩 Xử lý message từ signaling server
+  // 📩 Xử lý message từ signaling
   async function onSignalingMessage(msg) {
     logger.log("[Signaling] ←", msg);
 
@@ -143,10 +142,17 @@ const VideoCallPage = () => {
         await addRemoteCandidate(msg.candidate);
         break;
 
+      // ✅ Khi nhận tín hiệu end-call từ đối phương
       case "end-call":
         logger.log("🔴 End call received, cleaning up");
         closeConnection();
-        navigate("/dashboard");
+        window.isInCall = false;
+
+        if (fromChat) {
+          navigate("/chat");
+        } else {
+          navigate("/dashboard");
+        }
         break;
 
       default:
@@ -154,7 +160,24 @@ const VideoCallPage = () => {
     }
   }
 
-  // 🎥 Giao diện UI hiện đại (Meet-style)
+  // ✅ Hàm kết thúc cuộc gọi (End Call)
+  const handleEndCall = () => {
+    send({
+      type: "end-call",
+      from: userEmail,
+      to: peerEmailRef.current,
+    });
+    closeConnection();
+    window.isInCall = false;
+
+    if (fromChat) {
+      navigate("/chat");
+    } else {
+      navigate("/dashboard");
+    }
+  };
+
+  // ========================== UI (không thay đổi) ==========================
   return (
     <div className="relative flex flex-col items-center justify-center min-h-screen bg-gradient-to-br from-gray-900 via-gray-800 to-gray-900 text-white">
       {/* Header */}
@@ -164,7 +187,7 @@ const VideoCallPage = () => {
           <span className="text-blue-400">{userEmail}</span>
         </h2>
         <button
-          onClick={() => navigate("/dashboard")}
+          onClick={() => (fromChat ? navigate("/chat") : navigate("/dashboard"))}
           className="px-4 py-1.5 rounded-md bg-gray-700 hover:bg-gray-600 text-sm text-gray-200 transition"
         >
           ← Back
@@ -173,7 +196,6 @@ const VideoCallPage = () => {
 
       {/* Video layout */}
       <div className="flex flex-col md:flex-row items-center justify-center gap-6 mt-10 md:mt-0">
-        {/* Remote video */}
         <div className="relative">
           <video
             ref={remoteVideoRef}
@@ -186,7 +208,6 @@ const VideoCallPage = () => {
           </div>
         </div>
 
-        {/* Local video */}
         <div className="absolute bottom-28 right-10 md:bottom-10 md:right-10 w-[220px] h-[160px] rounded-xl overflow-hidden border border-gray-700 shadow-lg">
           <video
             ref={localVideoRef}
@@ -203,7 +224,7 @@ const VideoCallPage = () => {
 
       {/* Control bar */}
       <div className="absolute bottom-6 flex items-center justify-center gap-6 bg-gray-900/70 px-8 py-4 rounded-full shadow-lg backdrop-blur-sm border border-gray-700 z-20">
-        {/* Toggle Camera */}
+        {/* Camera toggle */}
         <button
           onClick={() => {
             const stream = localVideoRef.current?.srcObject;
@@ -214,25 +235,14 @@ const VideoCallPage = () => {
           className="flex flex-col items-center text-sm text-gray-300 hover:text-white transition"
         >
           <div className="w-12 h-12 rounded-full bg-gray-700 hover:bg-gray-600 flex items-center justify-center shadow-md transition">
-            <svg
-              xmlns="http://www.w3.org/2000/svg"
-              className="w-6 h-6"
-              fill="none"
-              viewBox="0 0 24 24"
-              stroke="currentColor"
-            >
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                strokeWidth={2}
-                d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14m0 0v1a2 2 0 01-2 2H6a2 2 0 01-2-2V9a2 2 0 012-2h7a2 2 0 012 2v5z"
-              />
+            <svg xmlns="http://www.w3.org/2000/svg" className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14m0 0v1a2 2 0 01-2 2H6a2 2 0 01-2-2V9a2 2 0 012-2h7a2 2 0 012 2v5z" />
             </svg>
           </div>
           <span className="mt-1">Camera</span>
         </button>
 
-        {/* Toggle Microphone */}
+        {/* Mic toggle */}
         <button
           onClick={() => {
             const stream = localVideoRef.current?.srcObject;
@@ -243,25 +253,9 @@ const VideoCallPage = () => {
           className="flex flex-col items-center text-sm text-gray-300 hover:text-white transition"
         >
           <div className="w-12 h-12 rounded-full bg-gray-700 hover:bg-gray-600 flex items-center justify-center shadow-md transition">
-            <svg
-              xmlns="http://www.w3.org/2000/svg"
-              className="w-6 h-6"
-              fill="none"
-              viewBox="0 0 24 24"
-              stroke="currentColor"
-            >
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                strokeWidth={2}
-                d="M12 1a3 3 0 00-3 3v7a3 3 0 006 0V4a3 3 0 00-3-3z"
-              />
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                strokeWidth={2}
-                d="M19 10v2a7 7 0 01-14 0v-2M12 19v4m-4 0h8"
-              />
+            <svg xmlns="http://www.w3.org/2000/svg" className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 1a3 3 0 00-3 3v7a3 3 0 006 0V4a3 3 0 00-3-3z" />
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 10v2a7 7 0 01-14 0v-2M12 19v4m-4 0h8" />
             </svg>
           </div>
           <span className="mt-1">Mic</span>
@@ -272,7 +266,7 @@ const VideoCallPage = () => {
           onClick={async () => {
             try {
               const screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true });
-              const pc = window.currentPeerConnection; // bạn có thể lưu peerConnection trong global hoặc context
+              const pc = window.currentPeerConnection;
               if (pc && pc.getSenders) {
                 const sender = pc.getSenders().find((s) => s.track?.kind === "video");
                 if (sender) sender.replaceTrack(screenStream.getTracks()[0]);
@@ -280,7 +274,6 @@ const VideoCallPage = () => {
               localVideoRef.current.srcObject = screenStream;
 
               screenStream.getVideoTracks()[0].onended = () => {
-                // Khi người dùng dừng share, revert về camera
                 navigator.mediaDevices.getUserMedia({ video: true, audio: true }).then((camStream) => {
                   if (sender) sender.replaceTrack(camStream.getTracks()[0]);
                   localVideoRef.current.srcObject = camStream;
@@ -293,19 +286,8 @@ const VideoCallPage = () => {
           className="flex flex-col items-center text-sm text-gray-300 hover:text-white transition"
         >
           <div className="w-12 h-12 rounded-full bg-gray-700 hover:bg-gray-600 flex items-center justify-center shadow-md transition">
-            <svg
-              xmlns="http://www.w3.org/2000/svg"
-              className="w-6 h-6"
-              fill="none"
-              viewBox="0 0 24 24"
-              stroke="currentColor"
-            >
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                strokeWidth={2}
-                d="M3 5h18M3 10h18M3 15h18M3 20h18"
-              />
+            <svg xmlns="http://www.w3.org/2000/svg" className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 5h18M3 10h18M3 15h18M3 20h18" />
             </svg>
           </div>
           <span className="mt-1">Share</span>
@@ -313,25 +295,11 @@ const VideoCallPage = () => {
 
         {/* End Call */}
         <button
-          onClick={() => {
-            send({
-              type: "end-call",
-              from: userEmail,
-              to: peerEmailRef.current,
-            });
-            closeConnection();
-            navigate("/dashboard");
-          }}
+          onClick={handleEndCall}
           className="flex flex-col items-center text-sm text-gray-300 hover:text-red-500 transition"
         >
           <div className="w-14 h-14 rounded-full bg-red-600 hover:bg-red-700 flex items-center justify-center shadow-md transition">
-            <svg
-              xmlns="http://www.w3.org/2000/svg"
-              className="w-7 h-7"
-              fill="none"
-              viewBox="0 0 24 24"
-              stroke="currentColor"
-            >
+            <svg xmlns="http://www.w3.org/2000/svg" className="w-7 h-7" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
             </svg>
           </div>
@@ -340,7 +308,6 @@ const VideoCallPage = () => {
       </div>
     </div>
   );
-
 };
 
 export default VideoCallPage;

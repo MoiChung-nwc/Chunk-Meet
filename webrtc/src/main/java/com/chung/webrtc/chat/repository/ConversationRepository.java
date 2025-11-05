@@ -7,17 +7,21 @@ import org.springframework.data.mongodb.repository.Query;
 import java.util.List;
 import java.util.Optional;
 
+/**
+ * Repository cho collection "conversation"
+ * Hỗ trợ truy vấn các cuộc trò chuyện 1-1 và nhóm.
+ */
 public interface ConversationRepository extends MongoRepository<Conversation, String> {
 
     /**
-     * 🔍 Tìm cuộc trò chuyện 1-1 giữa 2 người (bất kể thứ tự)
-     * $all: chứa cả 2 user
-     * $size: đúng 2 phần tử
-     * type: DIRECT
+     * ✅ FIXED: Tìm cuộc trò chuyện 1-1 giữa 2 người (bất kể thứ tự)
+     * MongoDB hỗ trợ $and để kết hợp $all + $size.
      */
-    @Query(value = "{ 'participants': { $all: [?0, ?1], $size: 2 }, 'type': 'DIRECT' }")
+    @Query(value = "{ $and: [ { 'participants': { $all: [?0, ?1] } }, { 'participants': { $size: 2 } }, { 'type': 'DIRECT' } ] }")
     Optional<Conversation> findDirectBetween(String userA, String userB);
 
+    /**
+     * 🔹 Lấy tất cả cuộc trò chuyện có user tham gia
+     */
     List<Conversation> findByParticipantsContaining(String email);
-
 }

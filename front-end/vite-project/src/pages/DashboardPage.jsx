@@ -1,11 +1,9 @@
 import React, { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { wsManager } from "../utils/WebSocketManager";
-import { createSignalingSocket } from "../utils/signaling";
 import {
   FaVideo,
   FaPlus,
-  FaRegClock,
   FaCalendarAlt,
   FaBell,
   FaShareSquare,
@@ -28,85 +26,65 @@ const DashboardPage = () => {
     sessionStorage.getItem("email") ||
     JSON.parse(localStorage.getItem("user") || "{}").email;
 
-  // 🕒 Realtime clock
+  // 🧩 Lắng nghe sự kiện toàn cục từ CallIntegration (reset input & navigate)
+  useEffect(() => {
+    // 🧹 Reset input email khi call bị reject hoặc end
+    const clearHandler = () => {
+      console.log("[Dashboard] 🧹 clearCalleeEmail → reset input");
+      setCallEmail("");
+      setShowCallModal(false);
+    };
+
+    // 🎬 Caller tự navigate sang videocall khi callee accept
+    const acceptHandler = (e) => {
+      const { to } = e.detail || {};
+      console.log("[Dashboard] 🎬 callAccepted event → navigate to videocall", to);
+
+      // ✅ Lưu peerEmail & isCaller vào sessionStorage để đồng bộ với callee
+      sessionStorage.setItem("peerEmail", to);
+      sessionStorage.setItem("isCaller", "true");
+
+      setCallEmail("");
+      setShowCallModal(false);
+      navigate("/videocall", { state: { to, isCaller: true } });
+    };
+
+    window.addEventListener("clearCalleeEmail", clearHandler);
+    window.addEventListener("callAccepted", acceptHandler);
+
+    return () => {
+      window.removeEventListener("clearCalleeEmail", clearHandler);
+      window.removeEventListener("callAccepted", acceptHandler);
+    };
+  }, [navigate]);
+
+  // 🕒 Đồng hồ realtime
   useEffect(() => {
     const timer = setInterval(() => setTime(new Date()), 1000);
     return () => clearInterval(timer);
   }, []);
-
-  // 🔌 WebSocket /ws/call
-  useEffect(() => {
-    if (!token || !email) {
-      navigate("/login");
-      return;
-    }
-
-    const connectCallSocket = async () => {
-      try {
-        await wsManager.connect("/ws/call", token, async (msg) => {
-          if (msg.type === "incoming-call") {
-            if (msg.from === email) return;
-            const accept = window.confirm(`📞 Có cuộc gọi từ ${msg.from}. Chấp nhận?`);
-            if (!accept) {
-              wsManager.send({ type: "reject-call", from: email, to: msg.from }, "/ws/call");
-              return;
-            }
-
-            sessionStorage.setItem("peerEmail", msg.from);
-            sessionStorage.setItem("isCaller", "false");
-            window.isInCall = true;
-
-            await createSignalingSocket(token);
-            wsManager.send({ type: "accept-call", from: email, to: msg.from }, "/ws/call");
-            navigate("/videocall", {
-              state: { from: msg.from, to: email, isCaller: false },
-            });
-          }
-
-          if (msg.type === "accept-call") {
-            if (msg.from === email) return;
-            sessionStorage.setItem("peerEmail", msg.from);
-            sessionStorage.setItem("isCaller", "true");
-            window.isInCall = true;
-
-            await createSignalingSocket(token);
-            navigate("/videocall", {
-              state: { from: email, to: msg.from, isCaller: true },
-            });
-          }
-
-          if (msg.type === "reject-call") {
-            toast.error(`${msg.from} đã từ chối cuộc gọi.`);
-          }
-        });
-      } catch (err) {
-        toast.error("Không thể kết nối call socket");
-      }
-    };
-
-    connectCallSocket();
-    return () => {
-      if (!window.isInCall && wsManager.isConnected("/ws/call")) {
-        wsManager.disconnect("/ws/call", "Leaving dashboard");
-      }
-    };
-  }, [token, email, navigate]);
 
   // 📞 New Call
   const startNewCall = async () => {
     if (!callEmail.trim()) return toast.error("Vui lòng nhập email người nhận!");
     if (callEmail === email) return toast.error("⚠️ Bạn không thể gọi chính mình!");
 
-    setShowCallModal(false);
-    sessionStorage.setItem("peerEmail", callEmail);
-    sessionStorage.setItem("isCaller", "true");
+    try {
+      const ready = await wsManager.waitUntilReady("/ws/call", 2000);
+      if (!ready) return toast.error("Call socket chưa sẵn sàng!");
 
-    const ready = await wsManager.waitUntilReady("/ws/call", 2000);
-    if (!ready) return toast.error("Call socket chưa sẵn sàng!");
+      window.isInCall = true;
+      wsManager.send({ type: "start-call", from: email, to: callEmail }, "/ws/call");
+      toast.success(`📤 Đã gửi lời gọi tới ${callEmail}`);
 
-    window.isInCall = true;
-    wsManager.send({ type: "start-call", from: email, to: callEmail }, "/ws/call");
-    toast.success(`📤 Đã gửi lời gọi tới ${callEmail}`);
+      // ✅ Đặt sau khi gửi thành công
+      setShowCallModal(false);
+      sessionStorage.setItem("peerEmail", callEmail);
+      sessionStorage.setItem("isCaller", "true");
+    } catch (err) {
+      toast.error("Không thể gửi cuộc gọi!");
+      console.error("Call error:", err);
+    }
   };
 
   // 🧩 Group meeting
@@ -121,7 +99,6 @@ const DashboardPage = () => {
       const { meetingCode, title } = res.data;
       toast.success(`🎉 Phòng "${title}" đã được tạo!`);
       setShowGroupModal(false);
-      // ✅ Normalize code
       navigate(`/group/${meetingCode.toLowerCase()}`);
     } catch {
       toast.error("Không thể tạo phòng họp nhóm!");
@@ -131,14 +108,14 @@ const DashboardPage = () => {
   const joinGroupMeeting = async () => {
     if (!joinCode.trim()) return toast.error("Vui lòng nhập mã phòng!");
     try {
-      const normCode = joinCode.trim().toLowerCase(); // ✅ Normalize code trước khi gọi API
+      const normCode = joinCode.trim().toLowerCase();
       await axios.post(
         "http://localhost:8081/api/meetings/join",
         { meetingCode: normCode },
         { headers: { Authorization: `Bearer ${token}` } }
       );
       setShowGroupModal(false);
-      navigate(`/group/${normCode}`); // ✅ lowercase
+      navigate(`/group/${normCode}`);
     } catch {
       toast.error("❌ Mã phòng không hợp lệ!");
     }
@@ -166,7 +143,7 @@ const DashboardPage = () => {
     ]);
   }, []);
 
-  // Format time/date
+  // Format thời gian
   const formatTime = (d) =>
     d.toLocaleTimeString("vi-VN", { hour: "2-digit", minute: "2-digit" });
   const formatDate = (d) =>
@@ -207,7 +184,7 @@ const DashboardPage = () => {
         </div>
       </header>
 
-            {/* MAIN */}
+      {/* MAIN */}
       <main className="flex-1 flex flex-col items-center justify-center mt-8">
         <div className="text-5xl font-semibold mb-2">{formatTime(time)}</div>
         <div className="text-gray-500 mb-10">{formatDate(time)}</div>
@@ -237,7 +214,6 @@ const DashboardPage = () => {
             <span className="font-medium text-sm">Schedule</span>
           </button>
 
-          {/* 🔹 NEW: Chat button */}
           <button
             onClick={() => navigate("/chat")}
             className="flex flex-col items-center justify-center w-28 h-28 rounded-full bg-pink-50 hover:bg-pink-100 text-pink-700 shadow-md transition"

@@ -19,7 +19,6 @@ public class CallService {
         if (!sessionRegistry.isOnline(to)) {
             log.warn("❌ User {} is offline, cannot call", to);
 
-            // Gửi thông báo thất bại ngược lại cho caller
             ObjectNode fail = mapper.createObjectNode();
             fail.put("type", "call-failed");
             fail.put("to", to);
@@ -31,8 +30,8 @@ public class CallService {
         ObjectNode payload = mapper.createObjectNode();
         payload.put("type", "incoming-call");
         payload.put("from", from);
-
         boolean sent = sessionRegistry.sendToUser(to, payload.toString());
+
         log.info("📨 Sent incoming-call from {} -> {}", from, to);
         return sent;
     }
@@ -62,9 +61,7 @@ public class CallService {
                 }
             }
 
-            if (!sent) {
-                log.warn("⚠️ Failed to notify {} that {} accepted the call (peer not ready)", to, from);
-            }
+            if (!sent) log.warn("⚠️ Failed to notify {} that {} accepted the call", to, from);
         }).start();
     }
 
@@ -86,5 +83,8 @@ public class CallService {
 
         sessionRegistry.sendToUser(to, payload.toString());
         log.info("📴 {} hung up the call with {}", from, to);
+
+        // ❌ KHÔNG close session ở đây
+        // ✅ Giữ kết nối WebSocket để lần sau gọi lại không bị "offline"
     }
 }

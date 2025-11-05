@@ -11,6 +11,10 @@ import java.time.Instant;
 import java.util.*;
 import java.util.stream.Collectors;
 
+/**
+ * REST controller cho module chat 1-1 / nhóm.
+ * Trả dữ liệu JSON cho frontend React.
+ */
 @RestController
 @RequestMapping("/api/chat")
 @RequiredArgsConstructor
@@ -18,7 +22,7 @@ public class ChatController {
 
     private final ChatService chatService;
 
-    /** 📜 Lấy lịch sử chat theo conversationId */
+    /** 📜 Lấy lịch sử tin nhắn của 1 conversation */
     @GetMapping("/{conversationId}")
     public ResponseEntity<List<Message>> getChatHistory(@PathVariable String conversationId) {
         return ResponseEntity.ok(chatService.getMessages(conversationId));
@@ -33,7 +37,7 @@ public class ChatController {
         return ResponseEntity.ok(chatService.getOrCreateConversation(userA, userB));
     }
 
-    /** 🆕 Lấy danh sách conversation của 1 user (đã decode unreadMap + sort mới nhất) */
+    /** 🆕 Lấy danh sách conversation của user (đã decode participants + unreadMap + sort) */
     @GetMapping("/my-conversations")
     public ResponseEntity<List<Map<String, Object>>> getMyConversations(@RequestParam String email) {
         List<Conversation> conversations = chatService.getConversationsByUser(email);
@@ -42,11 +46,17 @@ public class ChatController {
                 .map(conv -> {
                     Map<String, Object> map = new HashMap<>();
                     map.put("id", conv.getId());
-                    map.put("participants", conv.getParticipants());
                     map.put("type", conv.getType());
                     map.put("createdAt", conv.getCreatedAt());
                     map.put("lastMessage", conv.getLastMessage());
-                    map.put("unreadMap", chatService.decodeUnreadMap(conv.getUnreadMap())); // ✅ decode key email
+                    map.put("unreadMap", chatService.decodeUnreadMap(conv.getUnreadMap()));
+
+                    // ✅ Decode participants sang email thật (fix undefined ở frontend)
+                    Set<String> decodedParticipants = conv.getParticipants().stream()
+                            .map(chatService::decodeKey)
+                            .collect(Collectors.toSet());
+                    map.put("participants", decodedParticipants);
+
                     return map;
                 })
                 .sorted((a, b) -> {
@@ -59,7 +69,7 @@ public class ChatController {
         return ResponseEntity.ok(response);
     }
 
-    /** ✅ Đánh dấu cuộc trò chuyện đã đọc */
+    /** ✅ Đánh dấu đã đọc 1 conversation */
     @PutMapping("/mark-read")
     public ResponseEntity<Void> markAsRead(
             @RequestParam String conversationId,
