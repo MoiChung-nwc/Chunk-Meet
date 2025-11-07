@@ -5,7 +5,7 @@ import axios from "axios";
 import { wsChatManager, wsManager } from "../../utils/WebSocketManager";
 
 const joinedRooms = new Set();
-const messageCache = {}; // ✅ Cache tin nhắn theo conversationId
+const messageCache = {}; // cache tin nhắn theo conversationId
 
 const ChatWindow = ({ user, onBack }) => {
   const [messages, setMessages] = useState([]);
@@ -24,16 +24,51 @@ const ChatWindow = ({ user, onBack }) => {
 
   const ts = () => new Date().toLocaleTimeString("vi-VN");
 
-  /** 📥 Xử lý tất cả message từ WebSocket */
+  // ===========================================================
+  // 📥 Handle incoming WS messages
+  // ===========================================================
   const handleMessage = (msg) => {
-    console.log(`[ChatWindow ${ts()}] 📨 WS message:`, msg);
+    if (!msg?.type) return;
     switch (msg.type) {
+      case "group-history":
+        if (msg.groupId === user.conversationId) {
+          setMessages(msg.messages || []);
+          messageCache[msg.groupId] = msg.messages || [];
+        }
+        break;
+
+      case "group-chat":
+        if (msg.groupId === user.conversationId) {
+          setMessages((prev) => [...prev, msg]);
+          messageCache[user.conversationId] = [
+            ...(messageCache[user.conversationId] || []),
+            msg,
+          ];
+        }
+        break;
+
+      case "typing-group":
+        if (msg.groupId === user.conversationId && msg.from !== email) {
+          setIsTyping(true);
+          clearTimeout(typingTimeoutRef.current);
+          typingTimeoutRef.current = setTimeout(() => setIsTyping(false), 1800);
+        }
+        break;
+
+      case "group-deleted":
+      case "group-member-removed":
+        if (msg.groupId === user.conversationId && msg.email === email) {
+          console.warn(`[ChatWindow ${ts()}] 🚫 Removed from group`);
+          setMessages([]);
+        }
+        break;
+
       case "chat-history":
-        console.log(
-          `[ChatWindow ${ts()}] 🧾 Received chat-history (${msg.messages?.length || 0} messages)`
-        );
-        setMessages(msg.messages || []);
-        messageCache[msg.conversationId] = msg.messages || [];
+        if (msg.conversationId === user.conversationId) {
+          setMessages(msg.messages || []);
+          messageCache[msg.conversationId] = msg.messages || [];
+          markConversationAsRead(msg.conversationId);
+        }
         break;
 
       case "chat":
@@ -45,10 +80,17 @@ const ChatWindow = ({ user, onBack }) => {
                 m.sender === msg.sender &&
                 m.message === msg.message
             );
-            const next = exists ? prev : [...prev, msg];
-            messageCache[user.conversationId] = next;
-            return next;
+            if (exists) return prev;
+            const updated = [...prev, msg];
+            messageCache[user.conversationId] = updated;
+            return updated;
           });
+          if (msg.sender === email) {
+            wsChatManager.send(
+              { type: "read-update", conversationId: msg.conversationId, reader: email },
+              "/ws/chat"
+            );
+          }
         }
         break;
 
@@ -56,126 +98,82 @@ const ChatWindow = ({ user, onBack }) => {
         if (msg.from === user.email) {
           setIsTyping(true);
           clearTimeout(typingTimeoutRef.current);
-          typingTimeoutRef.current = setTimeout(() => setIsTyping(false), 2000);
+          typingTimeoutRef.current = setTimeout(() => setIsTyping(false), 1800);
         }
         break;
 
-      /** ✅ Cập nhật trạng thái online qua danh sách */
       case "online-users":
-        if (Array.isArray(msg.users)) {
-          const targetOnline = msg.users.includes(user.email);
-          setIsOnline(targetOnline);
-          console.log(
-            `[ChatWindow ${ts()}] 🌐 online-users update: ${user.email} = ${targetOnline}`
-          );
+        if (Array.isArray(msg.users) && !user.isGroup) {
+          setIsOnline(msg.users.includes(user.email));
         }
         break;
 
-      /** ✅ Cập nhật realtime khi user online/offline */
       case "user-status":
-        if (msg.email === user.email) {
+        if (msg.email === user.email && !user.isGroup) {
           setIsOnline(msg.online);
           setLastSeen(msg.lastSeen || null);
-          console.log(
-            `[ChatWindow ${ts()}] 👤 ${msg.email} is now ${
-              msg.online ? "online" : "offline"
-            }`
-          );
-        }
-        break;
-
-      case "read-update":
-        if (msg.conversationId === user.conversationId) {
-          console.log(`[ChatWindow ${ts()}] 📖 Read-update by ${msg.reader}`);
         }
         break;
 
       default:
-        console.log(`[ChatWindow ${ts()}] ⚠️ Unhandled WS:`, msg);
+        console.debug(`[ChatWindow ${ts()}] ⚙️ Unhandled WS:`, msg.type);
     }
   };
 
-  /** 🔌 Mount ChatWindow */
+  // ===========================================================
+  // 🔌 Khi mount ChatWindow
+  // ===========================================================
   useEffect(() => {
-    if (!user?.conversationId) return;
-    console.log(`[ChatWindow ${ts()}] 🧩 Mount conversation=${user.conversationId}`);
+    if (!user?.conversationId || !token) return;
 
-    // ✅ Nếu có cache → khôi phục
+    console.log(`[ChatWindow ${ts()}] 🎯 Open chat: ${user.conversationId}`);
+
     if (messageCache[user.conversationId]) {
-      console.log(
-        `[ChatWindow ${ts()}] ♻️ Restoring ${messageCache[user.conversationId].length} cached messages`
-      );
       setMessages(messageCache[user.conversationId]);
     }
 
     const connect = async () => {
       try {
-        console.log(`[ChatWindow ${ts()}] 🔌 Connecting /ws/chat for ${email}`);
-        await wsChatManager.connect("/ws/chat", token, handleMessage, true);
-
+        await wsChatManager.connect("/ws/chat", token, handleMessage);
         if (!joinedRooms.has(user.conversationId)) {
-          console.log(`[ChatWindow ${ts()}] 🚀 Sending join for ${user.conversationId}`);
           wsChatManager.send(
-            { type: "join", conversationId: user.conversationId },
+            user.isGroup
+              ? { type: "join-group", groupId: user.conversationId }
+              : { type: "join", conversationId: user.conversationId },
             "/ws/chat"
           );
           joinedRooms.add(user.conversationId);
         }
 
-        markConversationAsRead(user.conversationId);
-
-        // ✅ Sau khi join, yêu cầu danh sách online
-        setTimeout(() => {
-          console.log(`[ChatWindow ${ts()}] 📡 Requesting online-users`);
-          wsChatManager.send({ type: "request-online-users" }, "/ws/chat");
-        }, 500);
-      } catch (err) {
-        console.error(`[ChatWindow ${ts()}] ❌ Chat WS connect error:`, err);
-      }
-    };
-
-    connect();
-  }, [user]);
-
-  /** 🔁 Khi vừa kết thúc call và quay lại Chat */
-  useEffect(() => {
-    const reload = sessionStorage.getItem("reloadChatAfterCall");
-    if (reload === "true" && user?.conversationId) {
-      console.log(`[ChatWindow ${ts()}] 🔁 Detected reload flag, rejoining chat...`);
-      sessionStorage.removeItem("reloadChatAfterCall");
-
-      const rejoin = async () => {
-        console.log(`[ChatWindow ${ts()}] ⏳ Waiting 1s before rejoin...`);
-        await new Promise((r) => setTimeout(r, 1000));
-
-        if (!wsChatManager.isConnected("/ws/chat")) {
-          console.log(`[ChatWindow ${ts()}] ⚙️ Reconnecting chat socket...`);
-          await wsChatManager.connect("/ws/chat", token, handleMessage, true);
-        }
-
-        console.log(`[ChatWindow ${ts()}] 🔄 Sending join again for ${user.conversationId}`);
-        wsChatManager.send(
-          { type: "join", conversationId: user.conversationId },
-          "/ws/chat"
-        );
-
-        // ✅ Yêu cầu backend gửi lại lịch sử chat
-        setTimeout(() => {
+        if (user.isGroup) {
+          wsChatManager.send(
+            { type: "get-group-history", groupId: user.conversationId },
+            "/ws/chat"
+          );
+        } else {
           wsChatManager.send(
             { type: "get-history", conversationId: user.conversationId },
             "/ws/chat"
           );
-          wsChatManager.send({ type: "request-online-users" }, "/ws/chat");
-        }, 400);
+          markConversationAsRead(user.conversationId);
+          setTimeout(
+            () => wsChatManager.send({ type: "request-online-users" }, "/ws/chat"),
+            300
+          );
+        }
+      } catch (err) {
+        console.error(`[ChatWindow ${ts()}] ❌ WS connect error:`, err);
+      }
+    };
 
-        markConversationAsRead(user.conversationId);
-      };
-      rejoin();
-    }
-  }, [user?.conversationId]);
+    connect();
+  }, [user, token]);
 
-  /** 📖 Đánh dấu đã đọc */
+  // ===========================================================
+  // 📖 Đánh dấu đã đọc (chỉ 1-1)
+  // ===========================================================
   const markConversationAsRead = async (conversationId) => {
+    if (user.isGroup) return;
     try {
       await axios.put(
         `http://localhost:8081/api/chat/mark-read?conversationId=${conversationId}&email=${email}`,
@@ -186,56 +184,71 @@ const ChatWindow = ({ user, onBack }) => {
         { type: "read-update", conversationId, reader: email },
         "/ws/chat"
       );
-      console.log(`[ChatWindow ${ts()}] 📖 Marked as read conversation=${conversationId}`);
     } catch (err) {
-      console.error(`[ChatWindow ${ts()}] ⚠️ markAsRead error:`, err);
+      console.warn(`[ChatWindow ${ts()}] ⚠️ markAsRead error:`, err);
     }
   };
 
-  /** Cuộn xuống cuối */
+  // ===========================================================
+  // Cuộn xuống cuối khi có tin mới
+  // ===========================================================
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-    console.log(`[ChatWindow ${ts()}] 🖼 Rendering ${messages.length} messages`);
+    const timer = setTimeout(() => {
+      messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    }, 120);
+    return () => clearTimeout(timer);
   }, [messages]);
 
-  /** ✍️ Gửi typing */
+  // ===========================================================
+  // ✍️ Gửi typing
+  // ===========================================================
   const sendTyping = useCallback(() => {
     const now = Date.now();
-    if (now - lastTypingSentRef.current > 1500) {
+    if (now - lastTypingSentRef.current > 1000) {
       lastTypingSentRef.current = now;
       wsChatManager.send(
-        { type: "typing", conversationId: user.conversationId, from: email },
+        user.isGroup
+          ? { type: "typing-group", groupId: user.conversationId, from: email }
+          : { type: "typing", conversationId: user.conversationId, from: email },
         "/ws/chat"
       );
     }
-  }, [user?.conversationId, email]);
+  }, [user?.conversationId, email, user?.isGroup]);
 
-  /** 💬 Gửi tin nhắn */
+  // ===========================================================
+  // 💬 Gửi tin nhắn
+  // ===========================================================
   const sendMessage = () => {
     if (!newMsg.trim()) return;
-    wsChatManager.send(
-      { type: "chat", conversationId: user.conversationId, message: newMsg.trim() },
-      "/ws/chat"
-    );
+    const payload = user.isGroup
+      ? { type: "group-chat", groupId: user.conversationId, message: newMsg.trim() }
+      : { type: "chat", conversationId: user.conversationId, message: newMsg.trim() };
+
+    wsChatManager.send(payload, "/ws/chat");
     console.log(`[ChatWindow ${ts()}] ✉️ Sent message:`, newMsg.trim());
     setNewMsg("");
   };
 
-  /** 📞 Bắt đầu cuộc gọi */
+  // ===========================================================
+  // 📞 Gọi (chỉ 1-1)
+  // ===========================================================
   const handleStartCall = async () => {
+    if (user.isGroup) return;
     try {
-      console.log(`[ChatWindow ${ts()}] 📞 Starting call with ${user.email}`);
       sessionStorage.setItem("callOrigin", "chat");
       await wsManager.connect("/ws/call", token);
-      await new Promise((r) => setTimeout(r, 300));
+      await new Promise((r) => setTimeout(r, 200));
       wsManager.send({ type: "call", from: email, to: user.email }, "/ws/call");
     } catch (err) {
       console.error(`[ChatWindow ${ts()}] ❌ Call start error:`, err);
     }
   };
 
-  /** 🟢 Trạng thái user hiển thị */
+  // ===========================================================
+  // 🟢 Hiển thị trạng thái user
+  // ===========================================================
   const renderStatusText = () => {
+    if (user.isGroup) return `${user.members?.length || 0} thành viên`;
     if (isTyping) return "Đang nhập...";
     if (isOnline)
       return <span className="text-green-500 font-medium">Đang hoạt động</span>;
@@ -252,15 +265,22 @@ const ChatWindow = ({ user, onBack }) => {
     return <span className="text-gray-400">Ngoại tuyến</span>;
   };
 
+  // ===========================================================
+  // 🧩 UI
+  // ===========================================================
   return (
     <div className="flex flex-col h-full">
       {/* Header */}
-      <div className="flex items-center gap-3 px-5 py-3 border-b border-gray-200 bg-gray-50">
+      <div className="flex items-center gap-3 px-5 py-3 border-b bg-gray-50">
         <button onClick={onBack} className="md:hidden text-gray-500 hover:text-gray-700">
           <IoArrowBackSharp size={22} />
         </button>
         <img
-          src="https://cdn-icons-png.flaticon.com/512/3135/3135715.png"
+          src={
+            user.isGroup
+              ? "https://cdn-icons-png.flaticon.com/512/1077/1077114.png"
+              : "https://cdn-icons-png.flaticon.com/512/3135/3135715.png"
+          }
           alt={user.name}
           className="w-10 h-10 rounded-full"
         />
@@ -268,19 +288,21 @@ const ChatWindow = ({ user, onBack }) => {
           <p className="font-semibold text-gray-800">{user.firstName || user.name}</p>
           <p className="text-xs">{renderStatusText()}</p>
         </div>
-        <button
-          onClick={handleStartCall}
-          className="p-2 bg-blue-600 text-white rounded-full hover:bg-blue-700"
-        >
-          <FaPhone size={16} />
-        </button>
+        {!user.isGroup && (
+          <button
+            onClick={handleStartCall}
+            className="p-2 bg-blue-600 text-white rounded-full hover:bg-blue-700"
+          >
+            <FaPhone size={16} />
+          </button>
+        )}
       </div>
 
       {/* Messages */}
       <div className="flex-1 overflow-y-auto p-5 bg-gradient-to-b from-gray-50 to-white space-y-2">
         {messages.map((msg, idx) => (
           <div
-            key={idx}
+            key={`${msg.timestamp}-${idx}`}
             className={`flex ${msg.sender === email ? "justify-end" : "justify-start"}`}
           >
             <div
@@ -290,6 +312,11 @@ const ChatWindow = ({ user, onBack }) => {
                   : "bg-gray-200 text-gray-800 rounded-bl-none"
               }`}
             >
+              {user.isGroup && msg.sender !== email && (
+                <p className="text-[11px] font-semibold mb-1">
+                  {msg.sender.split("@")[0]}
+                </p>
+              )}
               {msg.message}
               <span className="block text-[10px] mt-1 opacity-70 text-right">
                 {new Date(msg.timestamp).toLocaleTimeString("vi-VN", {
@@ -300,6 +327,7 @@ const ChatWindow = ({ user, onBack }) => {
             </div>
           </div>
         ))}
+
         {isTyping && (
           <div className="flex justify-start">
             <div className="px-4 py-2 rounded-2xl bg-gray-200 text-gray-600 text-sm flex gap-1">
@@ -309,11 +337,12 @@ const ChatWindow = ({ user, onBack }) => {
             </div>
           </div>
         )}
+
         <div ref={messagesEndRef}></div>
       </div>
 
       {/* Input */}
-      <div className="p-4 border-t border-gray-200 bg-white flex items-center gap-3">
+      <div className="p-4 border-t bg-white flex items-center gap-3">
         <input
           type="text"
           value={newMsg}

@@ -13,4 +13,12 @@ public final class SecurityConstants {
 
     public static final String CLAIM_ROLES = "roles";
     public static final String CLAIM_PERMISSIONS = "permissions";
+
+    public static final String CREATE_GROUP = "/api/chat/group/create";
+    public static final String ADD_GROUP = "/api/chat/group/add";
+    public static final String REMOVE_GROUP = "/api/chat/group/remove";
+    public static final String UPDATE_MEMBER_ROLE = "/api/chat/group/role";
+    public static final String UPDATE_GROUP = "/api/chat/group/update";
+    public static final String DELETE_GROUP = "/api/chat/group/delete";
+    public static final String GET_MY_GROUP = "/api/chat/group/my";
 }

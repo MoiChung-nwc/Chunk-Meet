@@ -3,6 +3,7 @@ package com.chung.webrtc.chat.controller;
 import com.chung.webrtc.chat.entity.Conversation;
 import com.chung.webrtc.chat.entity.Message;
 import com.chung.webrtc.chat.service.ChatService;
+import com.chung.webrtc.common.util.MongoKeyUtil;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
@@ -49,11 +50,16 @@ public class ChatController {
                     map.put("type", conv.getType());
                     map.put("createdAt", conv.getCreatedAt());
                     map.put("lastMessage", conv.getLastMessage());
+                    map.put("lastMessageTime", conv.getLastMessageTime());
                     map.put("unreadMap", chatService.decodeUnreadMap(conv.getUnreadMap()));
 
-                    // ✅ Decode participants sang email thật (fix undefined ở frontend)
+                    // ✅ NEW: thêm 2 trường người gửi cuối cùng
+                    map.put("lastSender", conv.getLastSender());
+                    map.put("lastSenderName", conv.getLastSenderName());
+
+                    // ✅ Giải mã participants để frontend không bị undefined
                     Set<String> decodedParticipants = conv.getParticipants().stream()
-                            .map(chatService::decodeKey)
+                            .map(MongoKeyUtil::decode)
                             .collect(Collectors.toSet());
                     map.put("participants", decodedParticipants);
 

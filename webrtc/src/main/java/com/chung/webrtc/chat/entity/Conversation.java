@@ -12,6 +12,12 @@ import java.time.Instant;
 import java.util.Map;
 import java.util.Set;
 
+/**
+ * 💬 Conversation có thể là:
+ *  - DIRECT: Chat 1-1
+ *  - GROUP: Chat nhóm
+ *  - MEETING: Chat trong phòng họp (mở rộng sau)
+ */
 @Data
 @Builder
 @NoArgsConstructor
@@ -23,8 +29,20 @@ public class Conversation {
     private String id; // UUID hoặc meetingCode
 
     private ConversationType type; // DIRECT, GROUP, MEETING
-    private Set<String> participants;
+
+    private Set<String> participants; // email user hoặc groupId
+
     private Instant createdAt;
+
     private String lastMessage;
+
+    private Instant lastMessageTime;
+
+    private String lastSender;
+    private String lastSenderName;
+    /**
+     * ✅ Map<userEmail, unreadFlag>
+     * true nếu người đó có tin chưa đọc.
+     */
     private Map<String, Boolean> unreadMap;
 }

@@ -1,10 +1,9 @@
-// utils/WebSocketManager.js (v3.7 – stable, with end-call reconnect fix)
 class WebSocketManager {
   constructor(name = "default") {
+    this.name = name;
     this.sockets = new Map();
     this.listeners = new Map();
     this.defaultEndpoint = null;
-    this.name = name;
     this.lastToken = null;
   }
 
@@ -13,63 +12,80 @@ class WebSocketManager {
     return endpoint.startsWith("/") ? endpoint : `/${endpoint}`;
   }
 
-  _makeEntry(endpoint) {
+  _makeEntry() {
     return {
       socket: null,
       isOpening: false,
       openQueue: [],
+      lastConnect: 0,
     };
   }
 
-  async connect(endpoint, token, onMessage) {
+
+  async connect(endpoint, token, onMessage = null, force = false) {
     endpoint = this._normalizeEndpoint(endpoint);
     this.lastToken = token;
-
     let entry = this.sockets.get(endpoint);
+
     if (!entry) {
-      entry = this._makeEntry(endpoint);
+      entry = this._makeEntry();
       this.sockets.set(endpoint, entry);
     }
 
-    if (!this.listeners.has(endpoint)) this.listeners.set(endpoint, new Set());
-    if (onMessage) this.listeners.get(endpoint).add(onMessage);
+    // 🧩 Gắn listener an toàn, không trùng
+    if (onMessage) {
+      if (!this.listeners.has(endpoint)) this.listeners.set(endpoint, new Set());
+      const set = this.listeners.get(endpoint);
+      if (![...set].includes(onMessage)) set.add(onMessage);
+    }
 
     if (!this.defaultEndpoint) this.defaultEndpoint = endpoint;
 
-    if (entry.socket && entry.socket.readyState === WebSocket.OPEN) {
+    // 🔁 Nếu socket đã mở và không force
+    if (entry.socket && entry.socket.readyState === WebSocket.OPEN && !force) {
       console.log(`[WS:${this.name}][${endpoint}] ✅ already open`);
       return true;
     }
 
-    if (entry.isOpening) {
-      console.log(`[WS:${this.name}][${endpoint}] ⏳ waiting existing connection`);
+    // 🧱 Chặn double connect trong vòng 1 giây
+    const now = Date.now();
+    if (now - entry.lastConnect < 1000 && entry.isOpening) {
+      console.log(`[WS:${this.name}][${endpoint}] ⏳ skipping duplicate connect`);
       return this.waitUntilReady(endpoint);
     }
+    entry.lastConnect = now;
 
+    entry.isOpening = true;
     const url = `${this._baseUrl()}${endpoint}?token=${encodeURIComponent(token)}`;
     console.log(`[WS:${this.name}][${endpoint}] 🚀 connecting to ${url}`);
 
-    entry.isOpening = true;
-    entry.openQueue = [];
     const ws = new WebSocket(url);
     entry.socket = ws;
 
     return new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
-        console.warn(`[WS:${this.name}][${endpoint}] ⏰ connect timeout`);
         entry.isOpening = false;
         reject(new Error("connect timeout"));
       }, 8000);
 
       ws.onopen = () => {
         clearTimeout(timeout);
-        console.log(`[WS:${this.name}][${endpoint}] ✅ onopen fired at ${Date.now()}`);
         entry.isOpening = false;
+        console.log(`[WS:${this.name}][${endpoint}] ✅ onopen`);
 
+        // Gửi queue
         if (entry.openQueue.length > 0) {
-          console.log(`[WS:${this.name}][${endpoint}] ↩️ flushing ${entry.openQueue.length} queued messages`);
-          entry.openQueue.forEach((msg) => ws.send(JSON.stringify(msg)));
+          entry.openQueue.forEach((m) => ws.send(JSON.stringify(m)));
           entry.openQueue = [];
+        }
+
+        // 🔁 Chat auto-sync
+        if (this.name === "chat" && endpoint === "/ws/chat") {
+          console.log(`[WS:${this.name}] 🔁 Auto-sync groups & online users`);
+          setTimeout(() => {
+            this.send({ type: "request-online-users" }, "/ws/chat");
+            this.send({ type: "request-sync" }, "/ws/chat");
+          }, 500);
         }
 
         resolve(true);
@@ -87,14 +103,6 @@ class WebSocketManager {
                 console.error(`[WS:${this.name}][${endpoint}] listener error`, err);
               }
             });
-          }
-
-          if (msg?.type === "new-message" && typeof window.onNewMessage === "function") {
-            try {
-              window.onNewMessage(msg);
-            } catch (err) {
-              console.error(`[WS:${this.name}] window.onNewMessage error`, err);
-            }
           }
         } catch (err) {
           console.error(`[WS:${this.name}][${endpoint}] ❌ invalid message`, err);
@@ -114,10 +122,10 @@ class WebSocketManager {
         entry.socket = null;
         console.warn(`[WS:${this.name}][${endpoint}] 🚪 closed ${e.code} ${e.reason}`);
 
-        // 🔁 Auto reconnect (trừ khi logout/shutdown/manual)
+        // 🔁 Auto reconnect nhẹ
         if (!["logout", "shutdown", "manual disconnect"].includes(e.reason)) {
           const delay = 1500;
-          console.log(`[WS:${this.name}][${endpoint}] 🔁 reconnecting after ${delay}ms...`);
+          console.log(`[WS:${this.name}][${endpoint}] 🔁 reconnect after ${delay}ms`);
           setTimeout(() => {
             this.connect(endpoint, this.lastToken, null).catch(() => {
               console.warn(`[WS:${this.name}][${endpoint}] ❌ reconnect failed`);
@@ -128,20 +136,41 @@ class WebSocketManager {
     });
   }
 
-  async waitUntilReady(endpoint, timeout = 7000) {
+
+  send(obj, endpoint = null) {
+    if (!obj) return;
+    endpoint = endpoint ? this._normalizeEndpoint(endpoint) : this.defaultEndpoint;
+    const entry = this.sockets.get(endpoint);
+    if (!entry || !entry.socket) {
+      console.warn(`[WS:${this.name}][${endpoint}] ⚠️ socket not ready`);
+      return;
+    }
+
+    const ws = entry.socket;
+    const state = ws.readyState;
+    const stateName = ["CONNECTING", "OPEN", "CLOSING", "CLOSED"][state];
+    console.log(`[WS:${this.name}][${endpoint}] 📨 send(${obj.type}) state=${stateName}`);
+
+    if (state === WebSocket.OPEN) ws.send(JSON.stringify(obj));
+    else if (state === WebSocket.CONNECTING) {
+      entry.openQueue.push(obj);
+      console.log(`[WS:${this.name}][${endpoint}] ⏳ queued '${obj.type}'`);
+    } else console.warn(`[WS:${this.name}][${endpoint}] ❌ cannot send, socket closed`);
+  }
+
+
+  async waitUntilReady(endpoint, timeout = 6000) {
     endpoint = this._normalizeEndpoint(endpoint);
     const entry = this.sockets.get(endpoint);
-    if (!entry || !entry.socket) return false;
+    if (!entry?.socket) return false;
     if (entry.socket.readyState === WebSocket.OPEN) return true;
 
-    console.log(`[WS:${this.name}][${endpoint}] ⏳ waitUntilReady start`);
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => reject(new Error("waitUntilReady timeout")), timeout);
       entry.socket.addEventListener(
         "open",
         () => {
           clearTimeout(timer);
-          console.log(`[WS:${this.name}][${endpoint}] 🟢 waitUntilReady resolved`);
           resolve(true);
         },
         { once: true }
@@ -149,34 +178,14 @@ class WebSocketManager {
     });
   }
 
-  send(obj, endpoint = null) {
-    if (!obj) return;
-    endpoint = endpoint ? this._normalizeEndpoint(endpoint) : this.defaultEndpoint;
-    const entry = this.sockets.get(endpoint);
 
-    if (!entry || !entry.socket) {
-      console.warn(`[WS:${this.name}][${endpoint}] ⚠️ socket not initialized, dropping ${obj.type}`);
-      return;
-    }
-
-    const readyState = entry.socket.readyState;
-    const stateName = ["CONNECTING", "OPEN", "CLOSING", "CLOSED"][readyState];
-    console.log(`[WS:${this.name}][${endpoint}] 📨 send(${obj.type}) state=${stateName}`);
-
-    if (readyState === WebSocket.OPEN) {
-      entry.socket.send(JSON.stringify(obj));
-    } else if (readyState === WebSocket.CONNECTING) {
-      console.warn(`[WS:${this.name}][${endpoint}] ⏳ not open yet, queueing '${obj.type}'`);
-      entry.openQueue.push(obj);
-    } else {
-      console.warn(`[WS:${this.name}][${endpoint}] ❌ cannot send, socket closed`);
-    }
-  }
-
-  removeListener(endpoint, onMessage) {
+  removeListener(endpoint, onMessage = null) {
     endpoint = this._normalizeEndpoint(endpoint);
     const set = this.listeners.get(endpoint);
-    if (set) set.delete(onMessage);
+    if (set) {
+      if (onMessage) set.delete(onMessage);
+      else set.clear();
+    }
   }
 
   disconnect(endpoint, reason = "manual disconnect") {
@@ -187,7 +196,7 @@ class WebSocketManager {
     console.log(`[WS:${this.name}][${endpoint}] 🔻 disconnect: ${reason}`);
 
     if (this.name === "chat" && endpoint === "/ws/chat" && !["logout", "shutdown"].includes(reason)) {
-      console.log(`[WS:${this.name}][${endpoint}] ⚠️ Skip closing socket (keep alive for chat)`);
+      console.log(`[WS:${this.name}][${endpoint}] ⚠️ skip manual close (keep-alive chat)`);
       this.listeners.delete(endpoint);
       return;
     }
@@ -195,7 +204,6 @@ class WebSocketManager {
     entry.socket.close(1000, reason);
     this.sockets.delete(endpoint);
     this.listeners.delete(endpoint);
-    console.log(`[WS:${this.name}][${endpoint}] ✅ closed safely`);
   }
 
   isConnected(endpoint = null) {
@@ -213,7 +221,6 @@ class WebSocketManager {
   }
 }
 
-// 🔹 Instances
 export const wsManager = new WebSocketManager("main");
 export const wsMeetingManager = new WebSocketManager("meeting");
 export const wsChatManager = new WebSocketManager("chat");
