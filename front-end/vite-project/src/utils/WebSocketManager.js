@@ -21,7 +21,6 @@ class WebSocketManager {
     };
   }
 
-
   async connect(endpoint, token, onMessage = null, force = false) {
     endpoint = this._normalizeEndpoint(endpoint);
     this.lastToken = token;
@@ -32,7 +31,7 @@ class WebSocketManager {
       this.sockets.set(endpoint, entry);
     }
 
-    // 🧩 Gắn listener an toàn, không trùng
+    // Gắn listener (tránh trùng)
     if (onMessage) {
       if (!this.listeners.has(endpoint)) this.listeners.set(endpoint, new Set());
       const set = this.listeners.get(endpoint);
@@ -41,13 +40,13 @@ class WebSocketManager {
 
     if (!this.defaultEndpoint) this.defaultEndpoint = endpoint;
 
-    // 🔁 Nếu socket đã mở và không force
+    // Nếu socket đang mở
     if (entry.socket && entry.socket.readyState === WebSocket.OPEN && !force) {
       console.log(`[WS:${this.name}][${endpoint}] ✅ already open`);
       return true;
     }
 
-    // 🧱 Chặn double connect trong vòng 1 giây
+    // Chặn double connect
     const now = Date.now();
     if (now - entry.lastConnect < 1000 && entry.isOpening) {
       console.log(`[WS:${this.name}][${endpoint}] ⏳ skipping duplicate connect`);
@@ -79,7 +78,12 @@ class WebSocketManager {
           entry.openQueue = [];
         }
 
-        // 🔁 Chat auto-sync
+        // 🟢 Meeting auto-join sync
+        if (this.name === "meeting" && endpoint === "/ws/meeting") {
+          console.log(`[WS:${this.name}] 🔁 Ready to sync meeting events`);
+        }
+
+        // 🔁 Chat auto-sync (giữ nguyên)
         if (this.name === "chat" && endpoint === "/ws/chat") {
           console.log(`[WS:${this.name}] 🔁 Auto-sync groups & online users`);
           setTimeout(() => {
@@ -122,8 +126,11 @@ class WebSocketManager {
         entry.socket = null;
         console.warn(`[WS:${this.name}][${endpoint}] 🚪 closed ${e.code} ${e.reason}`);
 
-        // 🔁 Auto reconnect nhẹ
-        if (!["logout", "shutdown", "manual disconnect"].includes(e.reason)) {
+        // 🔁 Auto reconnect chỉ cho chat, KHÔNG cho meeting
+        if (
+          this.name !== "meeting" &&
+          !["logout", "shutdown", "manual disconnect"].includes(e.reason)
+        ) {
           const delay = 1500;
           console.log(`[WS:${this.name}][${endpoint}] 🔁 reconnect after ${delay}ms`);
           setTimeout(() => {
@@ -131,11 +138,12 @@ class WebSocketManager {
               console.warn(`[WS:${this.name}][${endpoint}] ❌ reconnect failed`);
             });
           }, delay);
+        } else if (this.name === "meeting") {
+          console.log(`[WS:${this.name}][${endpoint}] 🚫 meeting closed manually`);
         }
       };
     });
   }
-
 
   send(obj, endpoint = null) {
     if (!obj) return;
@@ -158,7 +166,6 @@ class WebSocketManager {
     } else console.warn(`[WS:${this.name}][${endpoint}] ❌ cannot send, socket closed`);
   }
 
-
   async waitUntilReady(endpoint, timeout = 6000) {
     endpoint = this._normalizeEndpoint(endpoint);
     const entry = this.sockets.get(endpoint);
@@ -177,7 +184,6 @@ class WebSocketManager {
       );
     });
   }
-
 
   removeListener(endpoint, onMessage = null) {
     endpoint = this._normalizeEndpoint(endpoint);

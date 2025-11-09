@@ -3,6 +3,7 @@ import { useParams, useNavigate } from "react-router-dom";
 import { AuthContext } from "../context/AuthContext";
 import toast from "react-hot-toast";
 import { wsMeetingManager } from "../utils/WebSocketManager";
+import EmojiPicker from "emoji-picker-react";
 import {
   FaMicrophone,
   FaMicrophoneSlash,
@@ -37,10 +38,40 @@ export default function GroupCallPage() {
   const [showChat, setShowChat] = useState(false);
   const [videoCount, setVideoCount] = useState(1);
 
+  /** 💬 Chat state */
+  const [chatMessages, setChatMessages] = useState([]);
+  const [messageInput, setMessageInput] = useState("");
+  const [showEmojiPicker, setShowEmojiPicker] = useState(false);
+
+  /** 💬 Gửi tin nhắn chat (chuẩn hóa với backend) */
+  const handleSendMessage = (e) => {
+    e.preventDefault();
+    if (!messageInput.trim()) return;
+
+    wsMeetingManager.send(
+      {
+        type: "meeting-chat",
+        message: messageInput.trim(),
+      },
+      "/ws/meeting"
+    );
+
+    setMessageInput("");
+    setShowEmojiPicker(false);
+  };
+
+  /** 😄 Khi chọn emoji */
+  const handleEmojiClick = (emojiData) => {
+    setMessageInput((prev) => prev + emojiData.emoji);
+  };
+
   /** 🎥 Khởi tạo stream local */
   const initLocalStream = async () => {
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: true,
+        audio: true,
+      });
       localStreamRef.current = stream;
       if (localVideoRef.current) localVideoRef.current.srcObject = stream;
       console.log("📹 Local stream initialized");
@@ -55,7 +86,6 @@ export default function GroupCallPage() {
     try {
       console.log("🚀 [GroupCallPage] meetingCode =", meetingCode);
 
-      // 📡 Lấy thông tin phòng
       const infoRes = await fetch(`http://localhost:8081/api/meetings/${meetingCode}`, {
         headers: { Authorization: `Bearer ${token}` },
       });
@@ -65,7 +95,6 @@ export default function GroupCallPage() {
         setParticipants(meetingInfo.participants || []);
       }
 
-      // 🔗 Gửi request join phòng
       const joinRes = await fetch(`http://localhost:8081/api/meetings/join`, {
         method: "POST",
         headers: {
@@ -82,12 +111,28 @@ export default function GroupCallPage() {
         return;
       }
 
-      // 🎥 Mở local camera/mic
       await initLocalStream();
 
-      // 🧠 Kết nối WS riêng cho meeting
       await wsMeetingManager.connect("/ws/meeting", token, handleSocketMessage);
-      wsMeetingManager.send({ type: "join", meetingCode, email: user.email }, "/ws/meeting");
+      wsMeetingManager.send({ type: "join", meetingCode }, "/ws/meeting");
+
+      const historyRes = await fetch(
+        `http://localhost:8081/api/meetings/${meetingCode}/messages`,
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      if (historyRes.ok) {
+        const data = await historyRes.json();
+        if (data?.messages) {
+          setChatMessages(
+            data.messages.map((m) => ({
+              from: m.sender,
+              message: m.content,
+              time: m.timestamp,
+              reactions: {},
+            }))
+          );
+        }
+      }
 
       setStatus("🟢 Connected to meeting");
     } catch (err) {
@@ -110,7 +155,6 @@ export default function GroupCallPage() {
           }
         });
         break;
-
       case "participant-joined":
         toast.success(`${msg.email} joined`);
         setParticipants((prev) => [...new Set([...prev, msg.email])]);
@@ -119,60 +163,69 @@ export default function GroupCallPage() {
           await createOffer(msg.email);
         }
         break;
-
       case "participant-left":
         toast.error(`${msg.email} left`);
         setParticipants((prev) => prev.filter((p) => p !== msg.email));
         removePeer(msg.email);
         break;
-
       case "offer":
         await handleOffer(msg);
         break;
-
       case "answer":
         await handleAnswer(msg);
         break;
-
       case "ice-candidate":
         await handleIce(msg);
         break;
-
-      case "chat":
-        toast(`${msg.from}: ${msg.message}`, { icon: "💬" });
+      case "meeting-chat":
+        setChatMessages((prev) => [
+          ...prev,
+          {
+            from: msg.sender,
+            message: msg.message,
+            time: msg.timestamp,
+            reactions: {},
+          },
+        ]);
         break;
-
       case "meeting-ended":
         toast.error("💥 Cuộc họp đã kết thúc bởi host");
         endCall(true);
         break;
-
       default:
         console.warn("⚠️ Unknown WS message", msg);
     }
   };
 
+  /** 🧡 Thêm reaction cho từng tin nhắn */
+  const handleAddReaction = (index, emoji) => {
+    setChatMessages((prev) => {
+      const updated = [...prev];
+      const msg = { ...updated[index] };
+      msg.reactions = msg.reactions || {};
+      msg.reactions[emoji] = (msg.reactions[emoji] || 0) + 1;
+      updated[index] = msg;
+      return updated;
+    });
+  };
+
   /** 🧱 WebRTC utilities */
   const createPeerConnection = (peerEmail) => {
     if (peersRef.current[peerEmail]) return peersRef.current[peerEmail];
-
     const pc = new RTCPeerConnection({
       iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
     });
 
-    // Gắn local stream
     if (localStreamRef.current) {
       localStreamRef.current.getTracks().forEach((t) => pc.addTrack(t, localStreamRef.current));
     }
 
-    // Nhận remote stream
     pc.ontrack = (e) => handleRemoteTrack(peerEmail, e.streams[0]);
 
-    // Gửi ICE candidate
     pc.onicecandidate = (e) => {
       if (e.candidate) {
         wsMeetingManager.send(
-          { type: "ice-candidate", to: peerEmail, from: user.email, candidate: e.candidate, meetingCode },
+          { type: "ice-candidate", to: peerEmail, from: user.email, candidate: e.candidate },
           "/ws/meeting"
         );
       }
@@ -187,21 +240,17 @@ export default function GroupCallPage() {
     const wrapper = document.createElement("div");
     wrapper.className =
       "video-tile relative flex flex-col items-center justify-center bg-black rounded-2xl overflow-hidden border border-gray-700 shadow-md aspect-video transition-transform hover:scale-105";
-
     const v = document.createElement("video");
     v.autoplay = true;
     v.playsInline = true;
     v.className = "w-full h-full object-cover";
     v.srcObject = stream;
-
     const label = document.createElement("div");
     label.className = "absolute bottom-2 left-2 text-sm bg-black/50 px-2 py-1 rounded";
     label.textContent = peerEmail;
-
     wrapper.appendChild(v);
     wrapper.appendChild(label);
     containerRef.current.appendChild(wrapper);
-
     remoteVideosRef.current[peerEmail] = wrapper;
     setVideoCount(containerRef.current.children.length);
   };
@@ -211,7 +260,7 @@ export default function GroupCallPage() {
     const offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
     wsMeetingManager.send(
-      { type: "offer", to: peerEmail, from: user.email, sdp: offer.sdp, meetingCode },
+      { type: "offer", to: peerEmail, from: user.email, sdp: offer.sdp },
       "/ws/meeting"
     );
   };
@@ -223,7 +272,7 @@ export default function GroupCallPage() {
     const answer = await pc.createAnswer();
     await pc.setLocalDescription(answer);
     wsMeetingManager.send(
-      { type: "answer", to: from, from: user.email, sdp: answer.sdp, meetingCode },
+      { type: "answer", to: from, from: user.email, sdp: answer.sdp },
       "/ws/meeting"
     );
   };
@@ -258,7 +307,6 @@ export default function GroupCallPage() {
     setVideoCount(containerRef.current.children.length);
   };
 
-  /** 🧩 Layout helper */
   const getGridClass = () => {
     if (videoCount <= 1) return "grid-cols-1";
     if (videoCount <= 2) return "grid-cols-2";
@@ -270,7 +318,6 @@ export default function GroupCallPage() {
 
   const delay = (ms) => new Promise((res) => setTimeout(res, ms));
 
-  /** 📴 Kết thúc cuộc gọi */
   const endCall = async (skipEndApi = false) => {
     const token = sessionStorage.getItem("accessToken");
     if (!skipEndApi && isHost) {
@@ -303,18 +350,17 @@ export default function GroupCallPage() {
     setCamEnabled((s) => !s);
   };
 
-  /** 🔄 Lifecycle */
   useEffect(() => {
     const token = sessionStorage.getItem("accessToken");
     if (!token) return navigate("/login");
     connectMeeting(token);
     return () => {
-      wsMeetingManager.send({ type: "leave", meetingCode, email: user.email }, "/ws/meeting");
+      wsMeetingManager.send({ type: "leave" }, "/ws/meeting");
       endCall(true);
     };
   }, [meetingCode]);
 
-  /** 🧭 Render UI (không thay đổi giao diện gốc) */
+  /** 🧭 Render UI */
   return (
     <div className="flex flex-col h-screen bg-[#1c1d22] text-white">
       {/* Header */}
@@ -346,7 +392,6 @@ export default function GroupCallPage() {
             ref={containerRef}
             className={`grid ${getGridClass()} gap-4 w-full h-full justify-center items-center transition-all duration-300`}
           >
-            {/* Local video */}
             <div className="relative flex flex-col items-center justify-center bg-black rounded-2xl overflow-hidden border-2 border-blue-500 shadow-lg aspect-video">
               <video
                 ref={localVideoRef}
@@ -367,7 +412,7 @@ export default function GroupCallPage() {
           </div>
         </div>
 
-        {/* Sidebar */}
+        {/* People Sidebar */}
         {showPeople && (
           <aside className="w-64 bg-[#25262d] border-l border-gray-700 p-4 overflow-y-auto">
             <h2 className="text-md font-semibold mb-3">
@@ -388,6 +433,106 @@ export default function GroupCallPage() {
             </ul>
           </aside>
         )}
+
+        {/* 💬 Chat Sidebar */}
+        {showChat && (
+          <aside className="w-80 bg-[#25262d] border-l border-gray-700 flex flex-col">
+            <div className="p-4 border-b border-gray-700">
+              <h2 className="text-md font-semibold">💬 Chat</h2>
+            </div>
+
+            <div className="flex-1 overflow-y-auto p-3 space-y-3">
+              {chatMessages.length === 0 ? (
+                <p className="text-gray-500 text-sm text-center mt-4">
+                  No messages yet
+                </p>
+              ) : (
+                chatMessages.map((m, i) => (
+                  <div
+                    key={i}
+                    className={`flex ${m.from === user.email ? "justify-end" : "justify-start"}`}
+                  >
+                    <div
+                      className={`max-w-[75%] p-2 rounded-lg text-sm relative ${
+                        m.from === user.email
+                          ? "bg-blue-600 text-white"
+                          : "bg-gray-700 text-gray-200"
+                      }`}
+                    >
+                      <p className="font-semibold text-xs text-gray-300 mb-1">
+                        {m.from === user.email ? "You" : m.from}
+                      </p>
+                      <p>{m.message}</p>
+                      {m.reactions && Object.keys(m.reactions).length > 0 && (
+                        <div className="flex flex-wrap gap-1 mt-1">
+                          {Object.entries(m.reactions).map(([emoji, count]) => (
+                            <span
+                              key={emoji}
+                              className="bg-black/30 px-2 py-[2px] rounded-full text-xs cursor-pointer"
+                              title={`${count} reaction`}
+                            >
+                              {emoji} {count > 1 && count}
+                            </span>
+                          ))}
+                        </div>
+                      )}
+                      <button
+                        onClick={() => handleAddReaction(i, "❤️")}
+                        className="absolute -top-2 -right-2 bg-black/50 text-xs rounded-full px-1.5 py-0.5 hover:bg-black/70"
+                        title="React ❤️"
+                      >
+                        ❤️
+                      </button>
+                      <p className="text-[10px] text-gray-400 mt-1 text-right">
+                        {new Date(m.time).toLocaleTimeString([], {
+                          hour: "2-digit",
+                          minute: "2-digit",
+                        })}
+                      </p>
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+
+            {/* input chat + emoji */}
+            <form
+              onSubmit={handleSendMessage}
+              className="border-t border-gray-700 p-3 flex items-center gap-2 relative"
+            >
+              <button
+                type="button"
+                onClick={() => setShowEmojiPicker((v) => !v)}
+                className="text-xl text-gray-400 hover:text-yellow-400"
+              >
+                <FaRegSmile />
+              </button>
+              {showEmojiPicker && (
+                <div className="absolute bottom-14 left-2 z-50">
+                  <EmojiPicker
+                    onEmojiClick={handleEmojiClick}
+                    emojiStyle="native"
+                    width={300}
+                    height={350}
+                  />
+                </div>
+              )}
+              <input
+                type="text"
+                value={messageInput}
+                onChange={(e) => setMessageInput(e.target.value)}
+                placeholder="Type a message..."
+                className="flex-1 bg-gray-800 text-white rounded-md px-3 py-2 text-sm outline-none"
+              />
+              <button
+                type="submit"
+                className="px-3 py-2 bg-blue-600 hover:bg-blue-700 rounded-md text-sm font-semibold"
+              >
+                Send
+              </button>
+            </form>
+          </aside>
+        )}
       </div>
 
       {/* Toolbar */}
@@ -398,9 +543,15 @@ export default function GroupCallPage() {
         <button onClick={toggleCam} className="p-3 rounded-full bg-gray-700 hover:bg-gray-600">
           {camEnabled ? <FaVideo /> : <FaVideoSlash />}
         </button>
-        <button className="p-3 rounded-full bg-gray-700 hover:bg-gray-600"><FaShareSquare /></button>
-        <button className="p-3 rounded-full bg-gray-700 hover:bg-gray-600"><FaRecordVinyl /></button>
-        <button className="p-3 rounded-full bg-gray-700 hover:bg-gray-600"><FaRegSmile /></button>
+        <button className="p-3 rounded-full bg-gray-700 hover:bg-gray-600">
+          <FaShareSquare />
+        </button>
+        <button className="p-3 rounded-full bg-gray-700 hover:bg-gray-600">
+          <FaRecordVinyl />
+        </button>
+        <button className="p-3 rounded-full bg-gray-700 hover:bg-gray-600">
+          <FaRegSmile />
+        </button>
         {isHost && (
           <button className="p-3 rounded-full bg-gray-700 hover:bg-gray-600">
             <FaShieldAlt />

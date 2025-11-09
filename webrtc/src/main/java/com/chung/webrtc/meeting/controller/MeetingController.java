@@ -1,6 +1,10 @@
 package com.chung.webrtc.meeting.controller;
 
 import com.chung.webrtc.auth.service.PermissionChecker;
+import com.chung.webrtc.chat.entity.Message;
+import com.chung.webrtc.chat.service.ChatGroupService;
+import com.chung.webrtc.common.exception.AppException;
+import com.chung.webrtc.common.exception.ErrorCode;
 import com.chung.webrtc.meeting.dto.request.CreateMeetingRequest;
 import com.chung.webrtc.meeting.dto.request.JoinMeetingRequest;
 import com.chung.webrtc.meeting.dto.response.MeetingResponse;
@@ -12,6 +16,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.Authentication;
 import org.springframework.web.bind.annotation.*;
 
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 
@@ -23,6 +28,7 @@ public class MeetingController {
 
     private final MeetingService meetingService;
     private final PermissionChecker permissionChecker;
+    private final ChatGroupService chatGroupService;
 
     private String norm(String code) {
         return code == null ? null : code.trim().toLowerCase();
@@ -138,5 +144,34 @@ public class MeetingController {
                     return ResponseEntity.status(404)
                             .body(Map.of("success", false, "message", "❌ Meeting not found"));
                 });
+    }
+
+    @GetMapping("/{code}/messages")
+    public ResponseEntity<?> getMeetingMessages(
+            Authentication authentication,
+            @PathVariable String code
+    ) {
+        String email = authentication.getName();
+        String normCode = code == null ? null : code.trim().toLowerCase();
+
+        // ✅ Kiểm tra permission: chỉ ai có JOIN_MEETING hoặc VIEW_MEETING mới được xem
+        if (!permissionChecker.hasAnyPermission("JOIN_MEETING", "VIEW_MEETING")) {
+            throw new AppException(ErrorCode.FORBIDDEN, "You do not have permission to view meeting messages");
+        }
+
+        try {
+            List<Message> messages = chatGroupService.getMeetingMessages(normCode);
+            log.info("📜 [{}] {} loaded {} messages", normCode, email, messages.size());
+
+            // ✅ CHỈ TRẢ VỀ { "messages": [...] } cho đúng với front-end
+            return ResponseEntity.ok(Map.of("messages", messages));
+
+        } catch (Exception e) {
+            log.error("❌ Failed to get meeting messages for {}: {}", normCode, e.getMessage());
+            return ResponseEntity.internalServerError().body(Map.of(
+                    "success", false,
+                    "message", "Failed to load meeting messages"
+            ));
+        }
     }
 }

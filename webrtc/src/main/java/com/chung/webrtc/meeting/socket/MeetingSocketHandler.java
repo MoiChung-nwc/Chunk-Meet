@@ -1,6 +1,9 @@
 package com.chung.webrtc.meeting.socket;
 
 import com.chung.webrtc.auth.service.JwtService;
+import com.chung.webrtc.chat.entity.Message;
+import com.chung.webrtc.chat.service.ChatGroupService;
+import com.chung.webrtc.chat.service.ChatSessionRegistry;
 import com.chung.webrtc.meeting.service.MeetingSessionRegistry;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -14,6 +17,7 @@ import org.springframework.web.socket.TextMessage;
 import org.springframework.web.socket.WebSocketSession;
 import org.springframework.web.socket.handler.TextWebSocketHandler;
 
+import java.util.List;
 import java.util.Set;
 
 @Slf4j
@@ -23,15 +27,15 @@ public class MeetingSocketHandler extends TextWebSocketHandler {
 
     private final JwtService jwtService;
     private final MeetingSessionRegistry sessionRegistry;
+    private final ChatGroupService chatGroupService;
+    private final ChatSessionRegistry chatSessionRegistry;
     private final ObjectMapper mapper = new ObjectMapper();
 
-    /** ✅ Khi client kết nối mới */
     @Override
     public void afterConnectionEstablished(WebSocketSession session) {
         log.info("🔗 [WS] Connection opened: {}", session.getId());
     }
 
-    /** ✅ Xử lý khi nhận message từ client */
     @Override
     protected void handleTextMessage(WebSocketSession session, TextMessage message) {
         try {
@@ -46,7 +50,8 @@ public class MeetingSocketHandler extends TextWebSocketHandler {
             switch (type) {
                 case "join" -> handleJoin(session, msg);
                 case "offer", "answer", "ice-candidate" -> handleSignaling(session, msg);
-                case "chat" -> handleChat(session, msg);
+                case "meeting-chat" -> handleMeetingChat(session, msg);
+                case "get-meeting-history" -> handleMeetingHistory(session);
                 case "leave" -> handleLeave(session, false);
                 default -> log.warn("⚠️ Unknown message type: {}", type);
             }
@@ -56,36 +61,37 @@ public class MeetingSocketHandler extends TextWebSocketHandler {
         }
     }
 
-    /** 👥 Xử lý khi người dùng join phòng */
     private void handleJoin(WebSocketSession session, JsonNode msg) {
         String meetingCode = msg.path("meetingCode").asText(null);
         String email = jwtService.extractEmailFromSession(session);
 
         if (email == null || meetingCode == null || meetingCode.isBlank()) {
             log.warn("🚫 Invalid join request — meetingCode/email missing");
-            try { session.close(CloseStatus.NOT_ACCEPTABLE); } catch (Exception ignored) {}
+            try {
+                session.close(CloseStatus.NOT_ACCEPTABLE);
+            } catch (Exception ignored) {}
             return;
         }
 
         session.getAttributes().put("meetingCode", meetingCode);
         session.getAttributes().put("email", email);
 
+        // 🟢 Đăng ký user vào cả registry meeting và chat
         sessionRegistry.addUserToRoom(meetingCode, email, session);
-        sendParticipantListToUser(session, meetingCode);
+        chatSessionRegistry.register(email, session);               // ✅ thêm dòng này
+        chatSessionRegistry.addToGroup(meetingCode, email);
 
-        // Broadcast user joined
+        sendParticipantListToUser(session, meetingCode);
+        broadcastParticipantList(meetingCode);
+
         ObjectNode joinMsg = mapper.createObjectNode();
         joinMsg.put("type", "participant-joined");
         joinMsg.put("email", email);
         sessionRegistry.broadcast(meetingCode, joinMsg.toString(), session);
 
-        // Sync participant list
-        broadcastParticipantList(meetingCode);
-
         log.info("🟢 [{}] {} joined meeting", meetingCode, email);
     }
 
-    /** 📤 Gửi danh sách participants hiện tại cho user mới */
     private void sendParticipantListToUser(WebSocketSession session, String meetingCode) {
         try {
             Set<String> participants = sessionRegistry.getParticipants(meetingCode);
@@ -94,13 +100,11 @@ public class MeetingSocketHandler extends TextWebSocketHandler {
             ArrayNode arr = listMsg.putArray("participants");
             participants.forEach(arr::add);
             session.sendMessage(new TextMessage(listMsg.toString()));
-            log.info("📤 [{}] Sent participant-list to {}", meetingCode, session.getAttributes().get("email"));
         } catch (Exception e) {
             log.error("❌ Failed to send participant-list", e);
         }
     }
 
-    /** 📡 Broadcast danh sách participant mới nhất cho toàn bộ phòng */
     private void broadcastParticipantList(String meetingCode) {
         try {
             Set<String> participants = sessionRegistry.getParticipants(meetingCode);
@@ -109,13 +113,11 @@ public class MeetingSocketHandler extends TextWebSocketHandler {
             ArrayNode arr = msg.putArray("participants");
             participants.forEach(arr::add);
             sessionRegistry.broadcast(meetingCode, msg.toString(), null);
-            log.info("📡 [{}] Broadcast participant-list: {}", meetingCode, participants);
         } catch (Exception e) {
             log.error("❌ Error broadcasting participant-list", e);
         }
     }
 
-    /** 🔄 Xử lý tín hiệu WebRTC: offer / answer / ice */
     private void handleSignaling(WebSocketSession session, JsonNode msg) {
         String meetingCode = sessionRegistry.getMeetingCode(session);
         String fromEmail = sessionRegistry.getEmail(session);
@@ -129,53 +131,71 @@ public class MeetingSocketHandler extends TextWebSocketHandler {
         ObjectNode relayMsg = msg.deepCopy();
         relayMsg.put("from", fromEmail);
         sessionRegistry.sendToUser(meetingCode, toEmail, relayMsg.toString());
-        log.debug("📡 [{}] {} → {} ({})", meetingCode, fromEmail, toEmail, msg.path("type").asText());
     }
 
-    /** 💬 Chat nhóm realtime */
-    private void handleChat(WebSocketSession session, JsonNode msg) {
+    private void handleMeetingChat(WebSocketSession session, JsonNode msg) {
         String meetingCode = sessionRegistry.getMeetingCode(session);
-        String fromEmail = sessionRegistry.getEmail(session);
-        if (meetingCode == null || fromEmail == null) return;
+        String sender = sessionRegistry.getEmail(session);
+        String content = msg.path("message").asText("");
 
-        String message = msg.path("message").asText("");
-        if (message.isBlank()) return;
+        if (meetingCode == null || content.isBlank()) return;
 
-        ObjectNode chatMsg = mapper.createObjectNode();
-        chatMsg.put("type", "chat");
-        chatMsg.put("from", fromEmail);
-        chatMsg.put("message", message);
-        sessionRegistry.broadcast(meetingCode, chatMsg.toString(), null);
-        log.info("💬 [{}] {}: {}", meetingCode, fromEmail, message);
+        Message saved = chatGroupService.saveMeetingMessage(meetingCode, sender, content);
+
+        ObjectNode node = mapper.createObjectNode();
+        node.put("type", "meeting-chat");
+        node.put("meetingCode", meetingCode);
+        node.put("sender", sender);
+        node.put("message", saved.getContent());
+        node.put("timestamp", saved.getTimestamp().toString());
+
+        // ✅ Gửi đến tất cả user WS đang online trong group
+        chatSessionRegistry.broadcastToGroup(meetingCode, node.toString());
+        log.info("💬 [{}] {}: {}", meetingCode, sender, content);
     }
 
-    /**
-     * 🟥 Khi user rời phòng (thủ công hoặc WS close)
-     * @param isDisconnect true nếu là mất kết nối (not explicit leave)
-     */
+    private void handleMeetingHistory(WebSocketSession session) {
+        String meetingCode = sessionRegistry.getMeetingCode(session);
+        if (meetingCode == null) return;
+
+        try {
+            List<Message> history = chatGroupService.getMeetingMessages(meetingCode);
+            ObjectNode hist = mapper.createObjectNode();
+            hist.put("type", "meeting-history");
+            hist.put("meetingCode", meetingCode);
+            ArrayNode arr = hist.putArray("messages");
+
+            history.forEach(m -> {
+                ObjectNode item = arr.addObject();
+                item.put("sender", m.getSender());
+                item.put("message", m.getContent());
+                item.put("timestamp", m.getTimestamp().toString());
+            });
+
+            session.sendMessage(new TextMessage(hist.toString()));
+            log.info("📜 [{}] Sent {} messages history", meetingCode, history.size());
+        } catch (Exception e) {
+            log.error("❌ Failed to send meeting history", e);
+        }
+    }
+
     private void handleLeave(WebSocketSession session, boolean isDisconnect) {
         String meetingCode = sessionRegistry.getMeetingCode(session);
         String email = sessionRegistry.getEmail(session);
 
-        // Nếu client gửi leave sai thời điểm → bỏ qua
-        if (meetingCode == null || email == null) {
-            log.warn("⚠️ Ignoring stray leave message (no meeting context) [{}]", session.getId());
-            return;
-        }
+        if (meetingCode == null || email == null) return;
 
         sessionRegistry.removeUser(session);
+        chatSessionRegistry.unregister(email, session);             // ✅ cleanup khi rời phòng
+        chatSessionRegistry.removeFromGroup(meetingCode, email);
 
-        // Gửi broadcast rời phòng
         ObjectNode leaveMsg = mapper.createObjectNode();
         leaveMsg.put("type", "participant-left");
         leaveMsg.put("email", email);
         sessionRegistry.broadcast(meetingCode, leaveMsg.toString(), null);
         broadcastParticipantList(meetingCode);
-
-        log.info("{} [{}] {} left meeting", isDisconnect ? "🔌" : "🔴", meetingCode, email);
     }
 
-    /** 🔌 Khi mất kết nối đột ngột (socket close, tab tắt, mạng rớt) */
     @Override
     public void afterConnectionClosed(WebSocketSession session, CloseStatus status) {
         handleLeave(session, true);
