@@ -4,6 +4,8 @@ import com.chung.webrtc.auth.service.JwtService;
 import com.chung.webrtc.chat.entity.Message;
 import com.chung.webrtc.chat.service.ChatGroupService;
 import com.chung.webrtc.chat.service.ChatSessionRegistry;
+import com.chung.webrtc.meeting.entity.MeetingTempMessage;
+import com.chung.webrtc.meeting.service.MeetingChatTempService;
 import com.chung.webrtc.meeting.service.MeetingSessionRegistry;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -29,6 +31,7 @@ public class MeetingSocketHandler extends TextWebSocketHandler {
     private final MeetingSessionRegistry sessionRegistry;
     private final ChatGroupService chatGroupService;
     private final ChatSessionRegistry chatSessionRegistry;
+    private final MeetingChatTempService meetingChatTempService; // ✅ Thêm service lưu chat TTL
     private final ObjectMapper mapper = new ObjectMapper();
 
     @Override
@@ -51,6 +54,7 @@ public class MeetingSocketHandler extends TextWebSocketHandler {
                 case "join" -> handleJoin(session, msg);
                 case "offer", "answer", "ice-candidate" -> handleSignaling(session, msg);
                 case "meeting-chat" -> handleMeetingChat(session, msg);
+                case "screen-share" -> handleScreenShare(session, msg);
                 case "get-meeting-history" -> handleMeetingHistory(session);
                 case "leave" -> handleLeave(session, false);
                 default -> log.warn("⚠️ Unknown message type: {}", type);
@@ -78,7 +82,7 @@ public class MeetingSocketHandler extends TextWebSocketHandler {
 
         // 🟢 Đăng ký user vào cả registry meeting và chat
         sessionRegistry.addUserToRoom(meetingCode, email, session);
-        chatSessionRegistry.register(email, session);               // ✅ thêm dòng này
+        chatSessionRegistry.register(email, session);
         chatSessionRegistry.addToGroup(meetingCode, email);
 
         sendParticipantListToUser(session, meetingCode);
@@ -133,6 +137,12 @@ public class MeetingSocketHandler extends TextWebSocketHandler {
         sessionRegistry.sendToUser(meetingCode, toEmail, relayMsg.toString());
     }
 
+    /**
+     * 💬 Chat trong cuộc họp:
+     * - Lưu tạm thời vào Mongo TTL (MeetingChatTempService)
+     * - Cập nhật conversation metadata (ChatGroupService)
+     * - Gửi realtime cho tất cả WS đang tham gia
+     */
     private void handleMeetingChat(WebSocketSession session, JsonNode msg) {
         String meetingCode = sessionRegistry.getMeetingCode(session);
         String sender = sessionRegistry.getEmail(session);
@@ -140,26 +150,32 @@ public class MeetingSocketHandler extends TextWebSocketHandler {
 
         if (meetingCode == null || content.isBlank()) return;
 
-        Message saved = chatGroupService.saveMeetingMessage(meetingCode, sender, content);
+        // ✅ Lưu tạm message trong Mongo TTL
+        meetingChatTempService.saveTempMessage(meetingCode, sender, content);
+
+        // ✅ Cập nhật Conversation metadata (type = MEETING)
+        chatGroupService.saveMeetingMessage(meetingCode, sender, content);
 
         ObjectNode node = mapper.createObjectNode();
         node.put("type", "meeting-chat");
         node.put("meetingCode", meetingCode);
         node.put("sender", sender);
-        node.put("message", saved.getContent());
-        node.put("timestamp", saved.getTimestamp().toString());
+        node.put("message", content);
+        node.put("timestamp", java.time.Instant.now().toString());
 
-        // ✅ Gửi đến tất cả user WS đang online trong group
         chatSessionRegistry.broadcastToGroup(meetingCode, node.toString());
         log.info("💬 [{}] {}: {}", meetingCode, sender, content);
     }
 
+    /**
+     * 📜 Gửi lại lịch sử chat tạm từ Mongo TTL (7 ngày)
+     */
     private void handleMeetingHistory(WebSocketSession session) {
         String meetingCode = sessionRegistry.getMeetingCode(session);
         if (meetingCode == null) return;
 
         try {
-            List<Message> history = chatGroupService.getMeetingMessages(meetingCode);
+            List<MeetingTempMessage> history = meetingChatTempService.getMessages(meetingCode);
             ObjectNode hist = mapper.createObjectNode();
             hist.put("type", "meeting-history");
             hist.put("meetingCode", meetingCode);
@@ -173,7 +189,7 @@ public class MeetingSocketHandler extends TextWebSocketHandler {
             });
 
             session.sendMessage(new TextMessage(hist.toString()));
-            log.info("📜 [{}] Sent {} messages history", meetingCode, history.size());
+            log.info("📜 [{}] Sent {} messages history (TTL)", meetingCode, history.size());
         } catch (Exception e) {
             log.error("❌ Failed to send meeting history", e);
         }
@@ -186,7 +202,7 @@ public class MeetingSocketHandler extends TextWebSocketHandler {
         if (meetingCode == null || email == null) return;
 
         sessionRegistry.removeUser(session);
-        chatSessionRegistry.unregister(email, session);             // ✅ cleanup khi rời phòng
+        chatSessionRegistry.unregister(email, session);
         chatSessionRegistry.removeFromGroup(meetingCode, email);
 
         ObjectNode leaveMsg = mapper.createObjectNode();
@@ -194,6 +210,20 @@ public class MeetingSocketHandler extends TextWebSocketHandler {
         leaveMsg.put("email", email);
         sessionRegistry.broadcast(meetingCode, leaveMsg.toString(), null);
         broadcastParticipantList(meetingCode);
+    }
+
+    private void handleScreenShare(WebSocketSession session, JsonNode msg) {
+        String meetingCode = sessionRegistry.getMeetingCode(session);
+        String email = sessionRegistry.getEmail(session);
+        boolean active = msg.path("active").asBoolean(false);
+
+        ObjectNode node = mapper.createObjectNode();
+        node.put("type", "screen-share");
+        node.put("email", email);
+        node.put("active", active);
+
+        sessionRegistry.broadcast(meetingCode, node.toString(), session);
+        log.info("🖥️ [{}] {} {}", meetingCode, email, active ? "started screen share" : "stopped screen share");
     }
 
     @Override

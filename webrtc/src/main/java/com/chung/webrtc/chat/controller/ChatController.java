@@ -41,6 +41,7 @@ public class ChatController {
     /** 🆕 Lấy danh sách conversation của user (đã decode participants + unreadMap + sort) */
     @GetMapping("/my-conversations")
     public ResponseEntity<List<Map<String, Object>>> getMyConversations(@RequestParam String email) {
+        // Lay ds conversation, tru Type = MEETING
         List<Conversation> conversations = chatService.getConversationsByUser(email);
 
         List<Map<String, Object>> response = conversations.stream()

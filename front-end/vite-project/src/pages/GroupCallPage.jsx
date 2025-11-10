@@ -29,10 +29,14 @@ export default function GroupCallPage() {
   const remoteVideosRef = useRef({});
   const containerRef = useRef(null);
   const localStreamRef = useRef(null);
+  const screenTrackRef = useRef(null);
+  const [focusedUser, setFocusedUser] = useState(null);
+
   const [participants, setParticipants] = useState([]);
   const [isHost, setIsHost] = useState(false);
   const [micEnabled, setMicEnabled] = useState(true);
   const [camEnabled, setCamEnabled] = useState(true);
+  const [isSharing, setIsSharing] = useState(false);
   const [status, setStatus] = useState("🔌 Connecting...");
   const [showPeople, setShowPeople] = useState(false);
   const [showChat, setShowChat] = useState(false);
@@ -43,11 +47,10 @@ export default function GroupCallPage() {
   const [messageInput, setMessageInput] = useState("");
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
 
-  /** 💬 Gửi tin nhắn chat (chuẩn hóa với backend) */
+  /** 💬 Gửi tin nhắn chat */
   const handleSendMessage = (e) => {
     e.preventDefault();
     if (!messageInput.trim()) return;
-
     wsMeetingManager.send(
       {
         type: "meeting-chat",
@@ -55,7 +58,6 @@ export default function GroupCallPage() {
       },
       "/ws/meeting"
     );
-
     setMessageInput("");
     setShowEmojiPicker(false);
   };
@@ -65,7 +67,7 @@ export default function GroupCallPage() {
     setMessageInput((prev) => prev + emojiData.emoji);
   };
 
-  /** 🎥 Khởi tạo stream local */
+  /** 🎥 Khởi tạo camera/mic */
   const initLocalStream = async () => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
@@ -81,11 +83,9 @@ export default function GroupCallPage() {
     }
   };
 
-  /** 🌐 Hàm xử lý join phòng */
+  /** 🌐 Kết nối meeting */
   const connectMeeting = async (token) => {
     try {
-      console.log("🚀 [GroupCallPage] meetingCode =", meetingCode);
-
       const infoRes = await fetch(`http://localhost:8081/api/meetings/${meetingCode}`, {
         headers: { Authorization: `Bearer ${token}` },
       });
@@ -112,27 +112,13 @@ export default function GroupCallPage() {
       }
 
       await initLocalStream();
-
       await wsMeetingManager.connect("/ws/meeting", token, handleSocketMessage);
       wsMeetingManager.send({ type: "join", meetingCode }, "/ws/meeting");
 
-      const historyRes = await fetch(
-        `http://localhost:8081/api/meetings/${meetingCode}/messages`,
-        { headers: { Authorization: `Bearer ${token}` } }
-      );
-      if (historyRes.ok) {
-        const data = await historyRes.json();
-        if (data?.messages) {
-          setChatMessages(
-            data.messages.map((m) => ({
-              from: m.sender,
-              message: m.content,
-              time: m.timestamp,
-              reactions: {},
-            }))
-          );
-        }
-      }
+      // ✅ Gửi yêu cầu lấy lịch sử chat sau khi join thành công
+      setTimeout(() => {
+        wsMeetingManager.send({ type: "get-meeting-history" }, "/ws/meeting");
+      }, 800);
 
       setStatus("🟢 Connected to meeting");
     } catch (err) {
@@ -142,9 +128,8 @@ export default function GroupCallPage() {
     }
   };
 
-  /** ⚡ Xử lý WS message */
+  /** ⚡ WS message */
   const handleSocketMessage = async (msg) => {
-    console.log("[WS][meeting] Message:", msg);
     switch (msg.type) {
       case "participant-list":
         setParticipants(msg.participants || []);
@@ -177,6 +162,8 @@ export default function GroupCallPage() {
       case "ice-candidate":
         await handleIce(msg);
         break;
+
+      /** 💬 Nhận tin nhắn chat realtime */
       case "meeting-chat":
         setChatMessages((prev) => [
           ...prev,
@@ -184,44 +171,52 @@ export default function GroupCallPage() {
             from: msg.sender,
             message: msg.message,
             time: msg.timestamp,
-            reactions: {},
           },
         ]);
         break;
+
+      /** 📜 Nhận lịch sử chat */
+      case "meeting-history":
+        console.log("📜 Nhận lịch sử chat:", msg.messages);
+        setChatMessages((prev) => [
+          ...msg.messages.map((m) => ({
+            from: m.sender,
+            message: m.message,
+            time: m.timestamp,
+          })),
+          ...prev,
+        ]);
+        break;
+
       case "meeting-ended":
         toast.error("💥 Cuộc họp đã kết thúc bởi host");
         endCall(true);
         break;
-      default:
-        console.warn("⚠️ Unknown WS message", msg);
+      case "screen-share":
+        if (msg.active) {
+          setFocusedUser(msg.email);
+          toast(`${msg.email} đang chia sẻ màn hình`);
+        } else if (focusedUser === msg.email) {
+          setFocusedUser(null);
+        }
+        break;
     }
   };
 
-  /** 🧡 Thêm reaction cho từng tin nhắn */
-  const handleAddReaction = (index, emoji) => {
-    setChatMessages((prev) => {
-      const updated = [...prev];
-      const msg = { ...updated[index] };
-      msg.reactions = msg.reactions || {};
-      msg.reactions[emoji] = (msg.reactions[emoji] || 0) + 1;
-      updated[index] = msg;
-      return updated;
-    });
-  };
-
-  /** 🧱 WebRTC utilities */
+  /** 🧱 WebRTC core */
   const createPeerConnection = (peerEmail) => {
     if (peersRef.current[peerEmail]) return peersRef.current[peerEmail];
     const pc = new RTCPeerConnection({
       iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
     });
 
-    if (localStreamRef.current) {
-      localStreamRef.current.getTracks().forEach((t) => pc.addTrack(t, localStreamRef.current));
-    }
+    const activeStream = isSharing
+      ? new MediaStream([screenTrackRef.current])
+      : localStreamRef.current;
+
+    if (activeStream) activeStream.getTracks().forEach((t) => pc.addTrack(t, activeStream));
 
     pc.ontrack = (e) => handleRemoteTrack(peerEmail, e.streams[0]);
-
     pc.onicecandidate = (e) => {
       if (e.candidate) {
         wsMeetingManager.send(
@@ -245,6 +240,9 @@ export default function GroupCallPage() {
     v.playsInline = true;
     v.className = "w-full h-full object-cover";
     v.srcObject = stream;
+    v.onclick = () => {
+      setFocusedUser((prev) => (prev === peerEmail ? null : peerEmail));
+    };
     const label = document.createElement("div");
     label.className = "absolute bottom-2 left-2 text-sm bg-black/50 px-2 py-1 rounded";
     label.textContent = peerEmail;
@@ -281,20 +279,66 @@ export default function GroupCallPage() {
     const pc = peersRef.current[msg.from];
     if (pc && pc.signalingState === "have-local-offer") {
       await pc.setRemoteDescription({ type: "answer", sdp: msg.sdp });
-    } else {
-      console.warn("⚠️ Skip duplicate/invalid answer:", pc?.signalingState);
     }
   };
 
   const handleIce = async (msg) => {
     const pc = peersRef.current[msg.from];
-    if (pc && msg.candidate) {
+    if (pc && msg.candidate) await pc.addIceCandidate(new RTCIceCandidate(msg.candidate));
+  };
+
+  /** 🖥️ Chia sẻ màn hình */
+  const toggleScreenShare = async () => {
+    if (!isSharing) {
       try {
-        await pc.addIceCandidate(new RTCIceCandidate(msg.candidate));
+        const screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true });
+        const screenTrack = screenStream.getVideoTracks()[0];
+        screenTrackRef.current = screenTrack;
+        localStreamRef.current = screenStream;
+        Object.values(peersRef.current).forEach((pc) => {
+          const sender = pc.getSenders().find((s) => s.track && s.track.kind === "video");
+          if (sender) sender.replaceTrack(screenTrack);
+        });
+        if (localVideoRef.current) localVideoRef.current.srcObject = screenStream;
+
+        wsMeetingManager.send(
+          { type: "screen-share", email: user.email, active: true },
+          "/ws/meeting"
+        );
+
+        screenTrack.onended = () => stopScreenShare();
+        toast.success("🖥️ Đang chia sẻ màn hình");
+        setIsSharing(true);
+        setFocusedUser(user.email);
       } catch (err) {
-        console.error("❌ ICE error:", err);
+        console.error("❌ Screen share error:", err);
+        toast.error("Không thể chia sẻ màn hình");
       }
+    } else {
+      stopScreenShare();
     }
+  };
+
+  const stopScreenShare = async () => {
+    if (!screenTrackRef.current) return;
+    screenTrackRef.current.stop();
+    const camStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+    const camTrack = camStream.getVideoTracks()[0];
+    localStreamRef.current = camStream;
+    Object.values(peersRef.current).forEach((pc) => {
+      const sender = pc.getSenders().find((s) => s.track && s.track.kind === "video");
+      if (sender) sender.replaceTrack(camTrack);
+    });
+    if (localVideoRef.current) localVideoRef.current.srcObject = camStream;
+
+    wsMeetingManager.send(
+      { type: "screen-share", email: user.email, active: false },
+      "/ws/meeting"
+    );
+
+    toast("🛑 Đã dừng chia sẻ màn hình");
+    setIsSharing(false);
+    setFocusedUser(null);
   };
 
   const removePeer = (email) => {
@@ -321,21 +365,15 @@ export default function GroupCallPage() {
   const endCall = async (skipEndApi = false) => {
     const token = sessionStorage.getItem("accessToken");
     if (!skipEndApi && isHost) {
-      try {
-        await fetch(`http://localhost:8081/api/meetings/${meetingCode}/end`, {
-          method: "POST",
-          headers: { Authorization: `Bearer ${token}` },
-        });
-        toast.success("✅ Cuộc họp đã kết thúc");
-      } catch (err) {
-        console.error("❌ End meeting failed:", err);
-      }
+      await fetch(`http://localhost:8081/api/meetings/${meetingCode}/end`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      toast.success("✅ Cuộc họp đã kết thúc");
     }
-
     Object.values(peersRef.current).forEach((pc) => pc.close());
     peersRef.current = {};
-    if (localStreamRef.current)
-      localStreamRef.current.getTracks().forEach((t) => t.stop());
+    localStreamRef.current?.getTracks().forEach((t) => t.stop());
     wsMeetingManager.disconnect("/ws/meeting", "Leaving meeting");
     navigate("/dashboard");
   };
@@ -390,9 +428,19 @@ export default function GroupCallPage() {
         <div className="flex-1 bg-[#1c1d22] p-4 overflow-auto">
           <div
             ref={containerRef}
-            className={`grid ${getGridClass()} gap-4 w-full h-full justify-center items-center transition-all duration-300`}
+            className={`grid ${focusedUser ? "grid-cols-1" : getGridClass()} gap-4 w-full h-full justify-center items-center transition-all duration-300`}
           >
-            <div className="relative flex flex-col items-center justify-center bg-black rounded-2xl overflow-hidden border-2 border-blue-500 shadow-lg aspect-video">
+            {/* Local video */}
+            <div
+              onClick={() => setFocusedUser((prev) => (prev === user.email ? null : user.email))}
+              className={`relative flex flex-col items-center justify-center bg-black rounded-2xl overflow-hidden border-2 ${
+                focusedUser === user.email ? "border-yellow-400 scale-[1.02]" : "border-blue-500"
+              } shadow-lg aspect-video cursor-pointer transition-transform duration-300`}
+              style={{
+                gridColumn: focusedUser === user.email ? "1 / -1" : undefined,
+                gridRow: focusedUser === user.email ? "1 / -1" : undefined,
+              }}
+            >
               <video
                 ref={localVideoRef}
                 autoPlay
@@ -412,7 +460,7 @@ export default function GroupCallPage() {
           </div>
         </div>
 
-        {/* People Sidebar */}
+        {/* Sidebars (People & Chat) giữ nguyên */}
         {showPeople && (
           <aside className="w-64 bg-[#25262d] border-l border-gray-700 p-4 overflow-y-auto">
             <h2 className="text-md font-semibold mb-3">
@@ -434,13 +482,11 @@ export default function GroupCallPage() {
           </aside>
         )}
 
-        {/* 💬 Chat Sidebar */}
         {showChat && (
           <aside className="w-80 bg-[#25262d] border-l border-gray-700 flex flex-col">
             <div className="p-4 border-b border-gray-700">
               <h2 className="text-md font-semibold">💬 Chat</h2>
             </div>
-
             <div className="flex-1 overflow-y-auto p-3 space-y-3">
               {chatMessages.length === 0 ? (
                 <p className="text-gray-500 text-sm text-center mt-4">
@@ -463,26 +509,6 @@ export default function GroupCallPage() {
                         {m.from === user.email ? "You" : m.from}
                       </p>
                       <p>{m.message}</p>
-                      {m.reactions && Object.keys(m.reactions).length > 0 && (
-                        <div className="flex flex-wrap gap-1 mt-1">
-                          {Object.entries(m.reactions).map(([emoji, count]) => (
-                            <span
-                              key={emoji}
-                              className="bg-black/30 px-2 py-[2px] rounded-full text-xs cursor-pointer"
-                              title={`${count} reaction`}
-                            >
-                              {emoji} {count > 1 && count}
-                            </span>
-                          ))}
-                        </div>
-                      )}
-                      <button
-                        onClick={() => handleAddReaction(i, "❤️")}
-                        className="absolute -top-2 -right-2 bg-black/50 text-xs rounded-full px-1.5 py-0.5 hover:bg-black/70"
-                        title="React ❤️"
-                      >
-                        ❤️
-                      </button>
                       <p className="text-[10px] text-gray-400 mt-1 text-right">
                         {new Date(m.time).toLocaleTimeString([], {
                           hour: "2-digit",
@@ -495,7 +521,7 @@ export default function GroupCallPage() {
               )}
             </div>
 
-            {/* input chat + emoji */}
+            {/* Chat input */}
             <form
               onSubmit={handleSendMessage}
               className="border-t border-gray-700 p-3 flex items-center gap-2 relative"
@@ -543,7 +569,13 @@ export default function GroupCallPage() {
         <button onClick={toggleCam} className="p-3 rounded-full bg-gray-700 hover:bg-gray-600">
           {camEnabled ? <FaVideo /> : <FaVideoSlash />}
         </button>
-        <button className="p-3 rounded-full bg-gray-700 hover:bg-gray-600">
+        {/* ✅ Nút chia sẻ màn hình */}
+        <button
+          onClick={toggleScreenShare}
+          className={`p-3 rounded-full ${
+            isSharing ? "bg-blue-600 hover:bg-blue-700" : "bg-gray-700 hover:bg-gray-600"
+          }`}
+        >
           <FaShareSquare />
         </button>
         <button className="p-3 rounded-full bg-gray-700 hover:bg-gray-600">

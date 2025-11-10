@@ -89,7 +89,7 @@ public class ChatService {
     }
 
     public List<Conversation> getConversationsByUser(String email) {
-        return conversationRepo.findByParticipantsContaining(email);
+        return conversationRepo.findNonMeetingConversations(email);
     }
 
     public void markAsRead(String conversationId, String email) {

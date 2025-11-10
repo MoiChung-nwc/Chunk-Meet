@@ -256,16 +256,8 @@ public class ChatGroupService {
         permissionUtil.validatePermission(sender, "CHAT_SEND");
 
         Instant now = Instant.now();
-        Message msg = Message.builder()
-                .conversationId(meetingCode)
-                .sender(sender)
-                .content(content)
-                .timestamp(now)
-                .isGroup(true)
-                .build();
 
-        Message saved = messageRepo.save(msg);
-
+        // ✅ Không lưu Message vào messageRepo (chỉ lưu Conversation metadata)
         conversationRepo.findById(meetingCode).ifPresentOrElse(conv -> {
             updateConversation(conv, sender, content, now);
         }, () -> {
@@ -283,8 +275,14 @@ public class ChatGroupService {
             conversationRepo.save(conv);
         });
 
-        log.info("💬 [{}] Saved meeting chat from {}", meetingCode, sender);
-        return saved;
+        // ⚠️ Không lưu thực vào messageRepo, chỉ trả message tạm để gửi realtime
+        return Message.builder()
+                .conversationId(meetingCode)
+                .sender(sender)
+                .content(content)
+                .timestamp(now)
+                .isGroup(true)
+                .build();
     }
 
     public List<Message> getMeetingMessages(String meetingCode) {
