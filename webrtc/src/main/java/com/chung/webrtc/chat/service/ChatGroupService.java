@@ -37,9 +37,6 @@ public class ChatGroupService {
     private final PermissionUtil permissionUtil;
     private final ObjectMapper mapper = new ObjectMapper();
 
-    // ============================================================
-    // 🚀 GROUP MANAGEMENT
-    // ============================================================
 
     public GroupResponse createGroup(CreateGroupRequest req) {
         permissionUtil.validatePermission(req.getCreatedBy(), "CHATGROUP_CREATE");
@@ -210,9 +207,7 @@ public class ChatGroupService {
                 .collect(Collectors.toList());
     }
 
-    // ============================================================
-    // 💬 Realtime Group Chat
-    // ============================================================
+    //  Realtime Group Chat
 
     public Message saveGroupMessage(String groupId, String sender, String content) {
         permissionUtil.validatePermission(sender, "CHAT_SEND");
@@ -248,9 +243,7 @@ public class ChatGroupService {
         return messages;
     }
 
-    // ============================================================
     // 💬 Meeting Chat Reuse
-    // ============================================================
 
     public Message saveMeetingMessage(String meetingCode, String sender, String content) {
         permissionUtil.validatePermission(sender, "CHAT_SEND");
@@ -289,9 +282,7 @@ public class ChatGroupService {
         return messageRepo.findByConversationIdOrderByTimestampAsc(meetingCode);
     }
 
-    // ============================================================
-    // 🧩 Helpers
-    // ============================================================
+    // Helpers
 
     private Group getGroupOrThrow(String id) {
         return chatGroupRepo.findById(id)

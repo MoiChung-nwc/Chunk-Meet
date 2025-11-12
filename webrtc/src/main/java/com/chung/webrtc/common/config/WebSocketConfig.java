@@ -1,6 +1,7 @@
 package com.chung.webrtc.common.config;
 
 import com.chung.webrtc.chat.socket.ChatSocketHandler;
+import com.chung.webrtc.file.socket.FileSocketHandler;
 import com.chung.webrtc.meeting.security.JwtHandshakeInterceptor;
 import com.chung.webrtc.meeting.socket.CallSocketHandler;
 import com.chung.webrtc.meeting.controller.SignalingController;
@@ -11,12 +12,7 @@ import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.web.socket.config.annotation.*;
 
-/**
- * ✅ WebSocket configuration (pure WebSocket, no SockJS)
- * Handles:
- *  - /ws/signaling  → WebRTC offer/answer/ICE signaling
- *  - /ws/call       → Incoming/accept/reject call notifications
- */
+
 @Slf4j
 @Configuration
 @EnableWebSocket
@@ -34,6 +30,8 @@ public class WebSocketConfig implements WebSocketConfigurer {
 
     private final ChatSocketHandler chatSocketHandler;
 
+    private final FileSocketHandler fileSocketHandler;
+
     @Override
     public void registerWebSocketHandlers(WebSocketHandlerRegistry registry) {
         log.info("🔧 Registering WebSocket endpoints (pure WebSocket mode)...");
@@ -49,8 +47,6 @@ public class WebSocketConfig implements WebSocketConfigurer {
                 .addInterceptors(jwtHandshakeInterceptor)
                 .setAllowedOriginPatterns("*");
 
-        log.info("✅ WebSocket endpoints registered successfully without SockJS");
-
         registry.addHandler(meetingSocketHandler, "/ws/meeting")
                 .addInterceptors(jwtHandshakeInterceptor)
                 .setAllowedOriginPatterns("*");
@@ -58,5 +54,11 @@ public class WebSocketConfig implements WebSocketConfigurer {
         registry.addHandler(chatSocketHandler, "/ws/chat")
                 .addInterceptors(jwtHandshakeInterceptor)
                 .setAllowedOriginPatterns("*");
+
+        registry.addHandler(fileSocketHandler, "/ws/file")
+                .addInterceptors(jwtHandshakeInterceptor)
+                .setAllowedOriginPatterns("*");
+
+        log.info("✅ All WebSocket endpoints registered successfully");
     }
 }
